@@ -24,6 +24,18 @@ export interface DigitalOceanDroplet {
   };
 }
 
+export class DigitalOceanApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly method: string,
+    readonly path: string
+  ) {
+    super(message);
+    this.name = "DigitalOceanApiError";
+  }
+}
+
 export class DigitalOceanClient {
   constructor(private readonly options: DigitalOceanClientOptions) {}
 
@@ -94,7 +106,7 @@ export class DigitalOceanClient {
         typeof parsed.message === "string"
           ? parsed.message
           : `DigitalOcean API request failed with HTTP ${response.status}`;
-      throw new Error(`${method} ${path}: ${message}`);
+      throw new DigitalOceanApiError(`${method} ${path}: ${message}`, response.status, method, path);
     }
 
     return parsed as T;
@@ -103,4 +115,8 @@ export class DigitalOceanClient {
 
 export function publicIpv4(droplet: DigitalOceanDroplet): string | undefined {
   return droplet.networks.v4?.find((network) => network.type === "public")?.ip_address;
+}
+
+export function isDigitalOceanNotFound(error: unknown): boolean {
+  return error instanceof DigitalOceanApiError && error.status === 404;
 }

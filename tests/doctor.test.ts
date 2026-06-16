@@ -11,6 +11,7 @@ describe("doctor", () => {
     await fs.promises.mkdir(path.join(projectRoot, ".devcontainer"));
     await fs.promises.writeFile(path.join(projectRoot, "auth.json"), "{}\n");
     const config = fakeConfig(projectRoot);
+    config.projectSlug = `doctor-managed-${Date.now()}`;
     config.remote.host = undefined;
     config.remote.user = undefined;
     config.remote.password = undefined;

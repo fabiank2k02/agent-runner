@@ -5,7 +5,8 @@ import { bootstrap } from "./commands/bootstrap.js";
 import {
   createDroplet,
   dropletStatus,
-  destroyDroplet
+  destroyDroplet,
+  refreshManagedDroplet
 } from "./commands/droplet.js";
 import { doctor } from "./commands/doctor.js";
 import { initProject } from "./commands/init.js";
@@ -218,11 +219,7 @@ export function buildProgram(): Command {
     .action(async (options: { yes: boolean }) => {
       const globals = getGlobals(program);
       const result = await destroyDroplet(createContext(globals).config, { yes: options.yes });
-      write(
-        globals,
-        result,
-        `droplet ${result.dropletId} destroyed`
-      );
+      write(globals, result, formatDropletDestroyed(result));
     });
 
   return program;
@@ -269,13 +266,21 @@ async function startTask(
   prompt: string,
   options: { taskId?: string; create?: boolean; skipUp?: boolean }
 ): Promise<void> {
-  const initialContext = createContext(globals);
-  if (options.create !== false && !initialContext.config.remote.host) {
-    const created = await createDroplet(initialContext.config);
-    write(globals, created, formatDropletCreated(created));
+  let context = createContext(globals);
+  if (options.create !== false && context.config.digitalOcean.token) {
+    const refresh = await refreshManagedDroplet(context.config);
+    if (refresh.staleCleared) {
+      write(globals, refresh, `cleared stale managed droplet state (${refresh.staleDroplet?.id})`);
+      context = createContext(globals);
+    }
   }
 
-  const context = createContext(globals);
+  if (options.create !== false && !context.config.remote.host) {
+    const created = await createDroplet(context.config);
+    write(globals, created, formatDropletCreated(created));
+    context = createContext(globals);
+  }
+
   const digest = await pushProject(context);
   write(globals, { digest }, `pushed workspace manifest ${digest}`);
 
@@ -295,7 +300,7 @@ async function finishTask(globals: GlobalOptions, options: { keepDroplet?: boole
 
   if (!options.keepDroplet) {
     const result = await destroyDroplet(context.config, { yes: true });
-    write(globals, result, `droplet ${result.dropletId} destroyed`);
+    write(globals, result, formatDropletDestroyed(result));
   }
 }
 
@@ -337,4 +342,10 @@ function formatDropletCreated(result: Awaited<ReturnType<typeof createDroplet>>)
     `size: ${result.size}`,
     `bootstrapped: ${result.bootstrapped ? "yes" : "no"}`
   ].join("\n");
+}
+
+function formatDropletDestroyed(result: Awaited<ReturnType<typeof destroyDroplet>>): string {
+  return result.alreadyMissing
+    ? `droplet ${result.dropletId} was already missing; local state cleared`
+    : `droplet ${result.dropletId} destroyed`;
 }

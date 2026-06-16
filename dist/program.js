@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Command } from "commander";
 import { bootstrap } from "./commands/bootstrap.js";
-import { createDroplet, dropletStatus, destroyDroplet } from "./commands/droplet.js";
+import { createDroplet, dropletStatus, destroyDroplet, refreshManagedDroplet } from "./commands/droplet.js";
 import { doctor } from "./commands/doctor.js";
 import { initProject } from "./commands/init.js";
 import { pullProject, pushProject } from "./commands/sync.js";
@@ -180,7 +180,7 @@ export function buildProgram() {
         .action(async (options) => {
         const globals = getGlobals(program);
         const result = await destroyDroplet(createContext(globals).config, { yes: options.yes });
-        write(globals, result, `droplet ${result.dropletId} destroyed`);
+        write(globals, result, formatDropletDestroyed(result));
     });
     return program;
 }
@@ -213,12 +213,19 @@ async function readStdin() {
     return Buffer.concat(chunks).toString("utf8");
 }
 async function startTask(globals, prompt, options) {
-    const initialContext = createContext(globals);
-    if (options.create !== false && !initialContext.config.remote.host) {
-        const created = await createDroplet(initialContext.config);
-        write(globals, created, formatDropletCreated(created));
+    let context = createContext(globals);
+    if (options.create !== false && context.config.digitalOcean.token) {
+        const refresh = await refreshManagedDroplet(context.config);
+        if (refresh.staleCleared) {
+            write(globals, refresh, `cleared stale managed droplet state (${refresh.staleDroplet?.id})`);
+            context = createContext(globals);
+        }
     }
-    const context = createContext(globals);
+    if (options.create !== false && !context.config.remote.host) {
+        const created = await createDroplet(context.config);
+        write(globals, created, formatDropletCreated(created));
+        context = createContext(globals);
+    }
     const digest = await pushProject(context);
     write(globals, { digest }, `pushed workspace manifest ${digest}`);
     if (!options.skipUp) {
@@ -234,7 +241,7 @@ async function finishTask(globals, options) {
     write(globals, { digest }, `pulled workspace manifest ${digest}`);
     if (!options.keepDroplet) {
         const result = await destroyDroplet(context.config, { yes: true });
-        write(globals, result, `droplet ${result.dropletId} destroyed`);
+        write(globals, result, formatDropletDestroyed(result));
     }
 }
 function write(options, value, text) {
@@ -272,5 +279,10 @@ function formatDropletCreated(result) {
         `size: ${result.size}`,
         `bootstrapped: ${result.bootstrapped ? "yes" : "no"}`
     ].join("\n");
+}
+function formatDropletDestroyed(result) {
+    return result.alreadyMissing
+        ? `droplet ${result.dropletId} was already missing; local state cleared`
+        : `droplet ${result.dropletId} destroyed`;
 }
 //# sourceMappingURL=program.js.map

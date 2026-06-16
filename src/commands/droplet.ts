@@ -1,6 +1,11 @@
 import type { ResolvedConfig } from "../config.js";
 import { bootstrap } from "./bootstrap.js";
-import { DigitalOceanClient, publicIpv4, type DigitalOceanDroplet } from "../digitalocean.js";
+import {
+  DigitalOceanClient,
+  isDigitalOceanNotFound,
+  publicIpv4,
+  type DigitalOceanDroplet
+} from "../digitalocean.js";
 import {
   readDigitalOceanState,
   stateAfterDestroy,
@@ -41,6 +46,22 @@ export interface DropletLifecycleResult {
 export interface DropletDestroyResult {
   dropletId: number;
   destroyed: boolean;
+  alreadyMissing?: boolean;
+}
+
+export interface ManagedDropletRefreshResult {
+  active: boolean;
+  staleCleared: boolean;
+  droplet?: {
+    id: number;
+    name: string;
+    status: string;
+    locked: boolean;
+    ip?: string;
+    region: string;
+    size: string;
+  };
+  staleDroplet?: ActiveDropletState;
 }
 
 export async function createDroplet(
@@ -58,9 +79,12 @@ export async function createDroplet(
   const image = options.image ?? config.digitalOcean.image;
 
   if (state?.activeDroplet) {
-    throw new Error(
+    const refresh = await refreshManagedDroplet(config);
+    if (refresh.active) {
+      throw new Error(
         `A managed droplet is already active (${state.activeDroplet.id}, ${state.activeDroplet.ip}). Run droplet destroy first.`
-    );
+      );
+    }
   }
 
   const droplet = await client.createDroplet({
@@ -120,26 +144,18 @@ export async function createDroplet(
 }
 
 export async function dropletStatus(config: ResolvedConfig): Promise<Record<string, unknown>> {
-  const state = await readDigitalOceanState(config.projectSlug);
-  if (!state?.activeDroplet) {
+  const refresh = await refreshManagedDroplet(config);
+  if (!refresh.active) {
     return {
-      active: false
+      active: false,
+      staleCleared: refresh.staleCleared,
+      staleDroplet: refresh.staleDroplet
     };
   }
 
-  const client = createClient(config);
-  const droplet = await client.getDroplet(state.activeDroplet.id);
   return {
     active: true,
-    droplet: {
-      id: droplet.id,
-      name: droplet.name,
-      status: droplet.status,
-      locked: droplet.locked,
-      ip: publicIpv4(droplet),
-      region: droplet.region.slug,
-      size: droplet.size_slug
-    }
+    droplet: refresh.droplet
   };
 }
 
@@ -158,13 +174,60 @@ export async function destroyDroplet(
 
   const client = createClient(config);
   const dropletId = state.activeDroplet.id;
-  await client.deleteDroplet(dropletId);
+  try {
+    await client.deleteDroplet(dropletId);
+  } catch (error) {
+    if (!isDigitalOceanNotFound(error)) {
+      throw error;
+    }
+    await writeDigitalOceanState(stateAfterDestroy(config.projectSlug));
+    return {
+      dropletId,
+      destroyed: false,
+      alreadyMissing: true
+    };
+  }
   await writeDigitalOceanState(stateAfterDestroy(config.projectSlug));
 
   return {
     dropletId,
     destroyed: true
   };
+}
+
+export async function refreshManagedDroplet(config: ResolvedConfig): Promise<ManagedDropletRefreshResult> {
+  const state = await readDigitalOceanState(config.projectSlug);
+  if (!state?.activeDroplet) {
+    return { active: false, staleCleared: false };
+  }
+
+  const client = createClient(config);
+  try {
+    const droplet = await client.getDroplet(state.activeDroplet.id);
+    return {
+      active: true,
+      staleCleared: false,
+      droplet: {
+        id: droplet.id,
+        name: droplet.name,
+        status: droplet.status,
+        locked: droplet.locked,
+        ip: publicIpv4(droplet),
+        region: droplet.region.slug,
+        size: droplet.size_slug
+      }
+    };
+  } catch (error) {
+    if (!isDigitalOceanNotFound(error)) {
+      throw error;
+    }
+    await writeDigitalOceanState(stateAfterDestroy(config.projectSlug));
+    return {
+      active: false,
+      staleCleared: true,
+      staleDroplet: state.activeDroplet
+    };
+  }
 }
 
 function createClient(config: ResolvedConfig): DigitalOceanClient {

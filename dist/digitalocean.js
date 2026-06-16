@@ -1,4 +1,16 @@
 const baseUrl = "https://api.digitalocean.com/v2";
+export class DigitalOceanApiError extends Error {
+    status;
+    method;
+    path;
+    constructor(message, status, method, path) {
+        super(message);
+        this.status = status;
+        this.method = method;
+        this.path = path;
+        this.name = "DigitalOceanApiError";
+    }
+}
 export class DigitalOceanClient {
     options;
     constructor(options) {
@@ -55,12 +67,15 @@ export class DigitalOceanClient {
             const message = typeof parsed.message === "string"
                 ? parsed.message
                 : `DigitalOcean API request failed with HTTP ${response.status}`;
-            throw new Error(`${method} ${path}: ${message}`);
+            throw new DigitalOceanApiError(`${method} ${path}: ${message}`, response.status, method, path);
         }
         return parsed;
     }
 }
 export function publicIpv4(droplet) {
     return droplet.networks.v4?.find((network) => network.type === "public")?.ip_address;
+}
+export function isDigitalOceanNotFound(error) {
+    return error instanceof DigitalOceanApiError && error.status === 404;
 }
 //# sourceMappingURL=digitalocean.js.map

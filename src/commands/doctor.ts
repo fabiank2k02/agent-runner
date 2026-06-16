@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { CommandContext } from "../context.js";
+import { refreshManagedDroplet } from "./droplet.js";
 
 export interface DoctorCheck {
   name: string;
@@ -16,8 +17,11 @@ export interface DoctorResult {
 export async function doctor(context: CommandContext): Promise<DoctorResult> {
   const checks: DoctorCheck[] = [];
   const { config, executor } = context;
-  const hasRemote = Boolean(config.remote.host);
   const hasManagedDigitalOcean = Boolean(config.digitalOcean.token);
+  const managedRefresh = hasManagedDigitalOcean
+    ? await refreshManagedDroplet(config)
+    : { active: false, staleCleared: false };
+  const hasRemote = Boolean(config.remote.host) && !managedRefresh.staleCleared;
 
   checks.push(await commandCheck(executor, "ssh", ["-V"], "ssh"));
   checks.push(await commandCheck(executor, "rsync", ["--version"], "rsync"));
@@ -37,7 +41,13 @@ export async function doctor(context: CommandContext): Promise<DoctorResult> {
   checks.push({
     name: "remote host",
     ok: hasRemote || hasManagedDigitalOcean,
-    detail: config.remote.host ?? (hasManagedDigitalOcean ? "managed DigitalOcean droplet will be created" : "AGENT_RUNNER_REMOTE_HOST is not set")
+    detail: hasRemote
+      ? config.remote.host ?? ""
+      : managedRefresh.staleCleared
+        ? `stale managed droplet state cleared (${managedRefresh.staleDroplet?.id}); managed DigitalOcean droplet will be created`
+        : hasManagedDigitalOcean
+          ? "managed DigitalOcean droplet will be created"
+          : "AGENT_RUNNER_REMOTE_HOST is not set"
   });
   checks.push({
     name: "remote user",

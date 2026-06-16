@@ -28,6 +28,12 @@ export interface DigitalOceanDroplet {
         }>;
     };
 }
+export declare class DigitalOceanApiError extends Error {
+    readonly status: number;
+    readonly method: string;
+    readonly path: string;
+    constructor(message: string, status: number, method: string, path: string);
+}
 export declare class DigitalOceanClient {
     private readonly options;
     constructor(options: DigitalOceanClientOptions);
@@ -46,3 +52,4 @@ export declare class DigitalOceanClient {
     private request;
 }
 export declare function publicIpv4(droplet: DigitalOceanDroplet): string | undefined;
+export declare function isDigitalOceanNotFound(error: unknown): boolean;
