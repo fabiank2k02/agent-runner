@@ -1,1 +1,10 @@
-.gitignore
+node_modules/
+dist/
+coverage/
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+.agent-runner/tmp/
+.agent-runner/cache/
