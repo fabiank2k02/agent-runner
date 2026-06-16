@@ -143,7 +143,7 @@ agent-runner stop
 agent-runner stop 20260616T075216Z-62c8b4
 ```
 
-`pull` syncs the VPS worktree back to your local project. If your local project changed since the last `push`, it first runs `git stash push --include-untracked`, preserves that stash across the incoming `.git` replacement, then restores it into the pulled repo's stash list.
+`pull` syncs the VPS worktree back to your local project. It first validates that the configured remote project directory exists; if there is no active/configured remote, it fails before touching the local worktree. If your local project changed since the last `push`, it then runs `git stash push --include-untracked`, preserves that stash across the incoming `.git` replacement, then restores it into the pulled repo's stash list.
 
 DigitalOcean lifecycle:
 

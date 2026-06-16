@@ -17,7 +17,17 @@ export interface RsyncArgsOptions {
 }
 
 export function buildRsyncArgs(config: ResolvedConfig, options: RsyncArgsOptions): string[] {
-  const sshParts = ["ssh", "-p", String(config.remote.port), "-o", "StrictHostKeyChecking=accept-new"];
+  const sshParts = [
+    "ssh",
+    "-p",
+    String(config.remote.port),
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+    "-o",
+    "ConnectTimeout=10",
+    "-o",
+    "ConnectionAttempts=1"
+  ];
   if (config.remote.password) {
     sshParts.push(
       "-o",

@@ -3,9 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { createProjectManifest } from "../manifest.js";
 import { dirnameRemote, quoteRemotePath } from "../quote.js";
+import { remoteTarget } from "../remote.js";
 import { runRsync } from "../rsync.js";
 import { requireSuccess } from "../shell.js";
 import { readLocalState, stateFromPull, stateFromPush, writeLocalState } from "../state.js";
+import { refreshManagedDroplet } from "./droplet.js";
 export async function pushProject(context) {
     const { config, layout, remote, executor, dryRun } = context;
     const manifest = await createProjectManifest(config.projectRoot);
@@ -34,6 +36,7 @@ export async function pullProject(context) {
     if (!existing?.lastPushedManifest) {
         throw new Error("No previous push state found. Run agent-runner push before pulling from the VPS.");
     }
+    await validatePullTarget(context);
     const current = await createProjectManifest(config.projectRoot);
     let stash;
     if (current.digest !== existing.lastPushedManifest.digest) {
@@ -52,6 +55,30 @@ export async function pullProject(context) {
     const updated = await createProjectManifest(config.projectRoot);
     await writeLocalState(layout, stateFromPull(layout, updated, existing));
     return updated.digest;
+}
+async function validatePullTarget(context) {
+    const { config, layout, remote } = context;
+    if (config.digitalOcean.token) {
+        const refresh = await refreshManagedDroplet(config);
+        if (refresh.staleCleared) {
+            throw new Error([
+                `Saved managed droplet ${refresh.staleDroplet?.id} no longer exists; local managed state was cleared.`,
+                "No pull was attempted and the local worktree was not changed.",
+                "Run agent-runner start to create a new droplet before pulling."
+            ].join("\n"));
+        }
+    }
+    try {
+        remoteTarget(config);
+    }
+    catch (error) {
+        throw new Error([
+            error instanceof Error ? error.message : String(error),
+            "No pull was attempted and the local worktree was not changed.",
+            "Run agent-runner start before agent-runner finish, or configure a remote host/user."
+        ].join("\n"));
+    }
+    await remote.run(`[ -d ${quoteRemotePath(layout.remoteProjectDir)} ] || { echo "Remote project directory not found: ${layout.remoteProjectDir}" >&2; exit 44; }`);
 }
 async function stashLocalChanges(context, digest) {
     const { config, executor, dryRun } = context;

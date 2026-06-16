@@ -13,6 +13,8 @@ export function buildSshArgs(config, command, tty = false) {
     }
     args.push("-p", String(config.remote.port));
     args.push("-o", "StrictHostKeyChecking=accept-new");
+    args.push("-o", "ConnectTimeout=10");
+    args.push("-o", "ConnectionAttempts=1");
     if (config.remote.password) {
         args.push("-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no");
     }

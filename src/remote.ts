@@ -23,6 +23,8 @@ export function buildSshArgs(config: ResolvedConfig, command?: string, tty = fal
   }
   args.push("-p", String(config.remote.port));
   args.push("-o", "StrictHostKeyChecking=accept-new");
+  args.push("-o", "ConnectTimeout=10");
+  args.push("-o", "ConnectionAttempts=1");
 
   if (config.remote.password) {
     args.push(

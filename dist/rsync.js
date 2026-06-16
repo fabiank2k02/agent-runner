@@ -4,7 +4,17 @@ import { remoteTarget } from "./remote.js";
 import { requireSuccess } from "./shell.js";
 const runnerExcludes = [".agent-runner/tmp/", ".agent-runner/cache/"];
 export function buildRsyncArgs(config, options) {
-    const sshParts = ["ssh", "-p", String(config.remote.port), "-o", "StrictHostKeyChecking=accept-new"];
+    const sshParts = [
+        "ssh",
+        "-p",
+        String(config.remote.port),
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "ConnectionAttempts=1"
+    ];
     if (config.remote.password) {
         sshParts.push("-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no");
     }

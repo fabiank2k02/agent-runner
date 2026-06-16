@@ -64,6 +64,34 @@ describe("pullProject", () => {
     expect(executor.calls.some((call) => call.command === "git")).toBe(false);
     expect(executor.calls.some((call) => call.command === "sshpass")).toBe(true);
   });
+
+  it("does not stash local changes when the pull target is unavailable", async () => {
+    const projectRoot = await tempDir("pull-missing-remote");
+    await fs.promises.writeFile(path.join(projectRoot, "file.txt"), "before");
+    const stateRoot = await tempDir("state-missing-remote");
+    const layout = fakeLayout(stateRoot);
+    const manifest = await createProjectManifest(projectRoot);
+    await writeLocalState(layout, stateFromPush(layout, manifest));
+    await fs.promises.writeFile(path.join(projectRoot, "file.txt"), "after");
+
+    const executor = new PullFakeExecutor({ gitStatus: " M file.txt" });
+    const context: CommandContext = {
+      config: {
+        ...fakeConfig(projectRoot),
+        digitalOcean: {
+          ...fakeConfig(projectRoot).digitalOcean,
+          token: undefined
+        }
+      },
+      layout,
+      executor,
+      remote: new FailingRemote(),
+      dryRun: false
+    };
+
+    await expect(pullProject(context)).rejects.toThrow("remote unavailable");
+    expect(executor.calls.some((call) => call.command === "git")).toBe(false);
+  });
 });
 
 class PullFakeExecutor extends FakeExecutor {
@@ -77,5 +105,11 @@ class PullFakeExecutor extends FakeExecutor {
       return { ...result, stdout: this.options.gitStatus };
     }
     return result;
+  }
+}
+
+class FailingRemote extends FakeRemote {
+  override async run() {
+    throw new Error("remote unavailable");
   }
 }
