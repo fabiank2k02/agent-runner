@@ -49,6 +49,7 @@ describe("resolveConfig", () => {
     expect(config.codex.extraArgs).toEqual(["--search"]);
     expect(config.digitalOcean.region).toBe("sgp1");
     expect(config.digitalOcean.size).toBe("s-2vcpu-4gb");
+    expect(config.digitalOcean.tags).toEqual([]);
   });
 
   it("defaults Codex to xhigh reasoning and yolo mode", async () => {

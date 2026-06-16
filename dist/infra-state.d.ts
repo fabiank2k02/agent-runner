@@ -1,0 +1,40 @@
+import { z } from "zod";
+declare const activeDropletSchema: z.ZodObject<{
+    id: z.ZodNumber;
+    name: z.ZodString;
+    ip: z.ZodString;
+    region: z.ZodString;
+    size: z.ZodString;
+    image: z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>;
+    user: z.ZodDefault<z.ZodString>;
+    sshKeyPath: z.ZodString;
+    sshKeyId: z.ZodOptional<z.ZodNumber>;
+    createdAt: z.ZodString;
+}, z.core.$strip>;
+declare const digitalOceanStateSchema: z.ZodDefault<z.ZodObject<{
+    version: z.ZodLiteral<1>;
+    projectSlug: z.ZodString;
+    activeDroplet: z.ZodOptional<z.ZodObject<{
+        id: z.ZodNumber;
+        name: z.ZodString;
+        ip: z.ZodString;
+        region: z.ZodString;
+        size: z.ZodString;
+        image: z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>;
+        user: z.ZodDefault<z.ZodString>;
+        sshKeyPath: z.ZodString;
+        sshKeyId: z.ZodOptional<z.ZodNumber>;
+        createdAt: z.ZodString;
+    }, z.core.$strip>>;
+    updatedAt: z.ZodString;
+}, z.core.$strip>>;
+export type ActiveDropletState = z.infer<typeof activeDropletSchema>;
+export type DigitalOceanState = z.infer<typeof digitalOceanStateSchema>;
+export declare function digitalOceanStateDir(): string;
+export declare function digitalOceanStateFile(projectSlug: string): string;
+export declare function readDigitalOceanStateSync(projectSlug: string): DigitalOceanState | undefined;
+export declare function readDigitalOceanState(projectSlug: string): Promise<DigitalOceanState | undefined>;
+export declare function writeDigitalOceanState(state: DigitalOceanState): Promise<void>;
+export declare function stateWithActiveDroplet(projectSlug: string, activeDroplet: ActiveDropletState, existing?: DigitalOceanState): DigitalOceanState;
+export declare function stateAfterDestroy(projectSlug: string): DigitalOceanState;
+export {};

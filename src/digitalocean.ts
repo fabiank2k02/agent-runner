@@ -48,15 +48,18 @@ export class DigitalOceanClient {
     sshKeys: Array<string | number>;
     tags: string[];
   }): Promise<DigitalOceanDroplet> {
-    const data = await this.request<{ droplet: DigitalOceanDroplet }>("POST", "/droplets", {
+    const body: Record<string, unknown> = {
       name: input.name,
       region: input.region,
       size: input.size,
       image: input.image,
       ssh_keys: input.sshKeys,
-      monitoring: true,
-      tags: input.tags
-    });
+      monitoring: true
+    };
+    if (input.tags.length > 0) {
+      body.tags = input.tags;
+    }
+    const data = await this.request<{ droplet: DigitalOceanDroplet }>("POST", "/droplets", body);
     return data.droplet;
   }
 

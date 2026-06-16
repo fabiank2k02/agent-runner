@@ -46,9 +46,9 @@ const configFileSchema = z
         size: z.string().min(1).optional(),
         image: z.string().min(1).optional(),
         dropletName: z.string().min(1).optional(),
-        tags: z.array(z.string()).default(["agent-runner"])
+        tags: z.array(z.string()).default([])
       })
-      .default({ tags: ["agent-runner"] })
+      .default({ tags: [] })
   });
 
 export type AgentRunnerConfigFile = z.infer<typeof configFileSchema>;
@@ -195,7 +195,7 @@ export function createDefaultConfig(projectRoot: string): AgentRunnerConfigFile 
       excludes: []
     },
     digitalOcean: {
-      tags: ["agent-runner"]
+      tags: []
     }
   };
 }

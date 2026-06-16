@@ -16,6 +16,8 @@ export interface DoctorResult {
 export async function doctor(context: CommandContext): Promise<DoctorResult> {
   const checks: DoctorCheck[] = [];
   const { config, executor } = context;
+  const hasRemote = Boolean(config.remote.host);
+  const hasManagedDigitalOcean = Boolean(config.digitalOcean.token);
 
   checks.push(await commandCheck(executor, "ssh", ["-V"], "ssh"));
   checks.push(await commandCheck(executor, "rsync", ["--version"], "rsync"));
@@ -34,22 +36,24 @@ export async function doctor(context: CommandContext): Promise<DoctorResult> {
 
   checks.push({
     name: "remote host",
-    ok: Boolean(config.remote.host),
-    detail: config.remote.host ?? "AGENT_RUNNER_REMOTE_HOST is not set"
+    ok: hasRemote || hasManagedDigitalOcean,
+    detail: config.remote.host ?? (hasManagedDigitalOcean ? "managed DigitalOcean droplet will be created" : "AGENT_RUNNER_REMOTE_HOST is not set")
   });
   checks.push({
     name: "remote user",
-    ok: Boolean(config.remote.user),
-    detail: config.remote.user ?? "AGENT_RUNNER_REMOTE_USER is not set"
+    ok: Boolean(config.remote.user) || hasManagedDigitalOcean,
+    detail: config.remote.user ?? (hasManagedDigitalOcean ? "managed DigitalOcean droplet will use root" : "AGENT_RUNNER_REMOTE_USER is not set")
   });
   checks.push({
     name: "remote password",
-    ok: Boolean(config.remote.password || config.remote.sshKey),
+    ok: Boolean(config.remote.password || config.remote.sshKey) || hasManagedDigitalOcean,
     detail: config.remote.password
       ? "AGENT_RUNNER_REMOTE_PASSWORD is set"
       : config.remote.sshKey
         ? "SSH key fallback is configured"
-        : "AGENT_RUNNER_REMOTE_PASSWORD is not set"
+        : hasManagedDigitalOcean
+          ? "managed DigitalOcean SSH key will be generated"
+          : "AGENT_RUNNER_REMOTE_PASSWORD is not set"
   });
   checks.push({
     name: "codex auth source",
