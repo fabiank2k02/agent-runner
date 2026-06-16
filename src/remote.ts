@@ -22,15 +22,14 @@ export function buildSshArgs(config: ResolvedConfig, command?: string, tty = fal
     args.push("-t");
   }
   args.push("-p", String(config.remote.port));
+  args.push("-o", "StrictHostKeyChecking=accept-new");
 
   if (config.remote.password) {
     args.push(
       "-o",
       "PreferredAuthentications=password",
       "-o",
-      "PubkeyAuthentication=no",
-      "-o",
-      "StrictHostKeyChecking=accept-new"
+      "PubkeyAuthentication=no"
     );
   } else if (config.remote.sshKey) {
     args.push("-i", config.remote.sshKey);

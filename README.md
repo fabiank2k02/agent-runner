@@ -1,16 +1,22 @@
 # agent-runner
 
-`agent-runner` is a TypeScript CLI for handing a local Codespace project to a VPS, running Codex there for long tasks, and bringing the result back only when the local workspace has not diverged.
+`agent-runner` is a TypeScript CLI for handing a local Codespace project to a VPS, running Codex there for long tasks, and bringing the result back while preserving local drift in Git stash.
 
-It is designed to be invoked from any project:
+Install it once in each Codespace:
 
 ```bash
-npx github:fabiank2k02/agent-runner init
-npx github:fabiank2k02/agent-runner doctor
-npx github:fabiank2k02/agent-runner bootstrap
-npx github:fabiank2k02/agent-runner push
-npx github:fabiank2k02/agent-runner up
-npx github:fabiank2k02/agent-runner run "finish the feature and verify it"
+npm install -g github:fabiank2k02/agent-runner
+```
+
+Then use it from any project:
+
+```bash
+agent-runner init
+agent-runner doctor
+agent-runner start --prompt-file prompt.md
+agent-runner status
+agent-runner logs
+agent-runner finish
 ```
 
 ## What It Does
@@ -20,8 +26,8 @@ npx github:fabiank2k02/agent-runner run "finish the feature and verify it"
 - Uses the project `.devcontainer` through the Dev Containers CLI.
 - Copies your local Codex auth cache from `~/.codex/auth.json` to `~/agent-runner/secrets/codex/auth.json` on the VPS with mode `600`.
 - Injects that auth cache into the devcontainer user home, never into the project workspace.
-- Runs long Codex tasks with `codex exec --json` inside named `tmux` sessions.
-- Refuses to sync remote work back if the local Codespace changed after the last push.
+- Runs long Codex tasks with `codex exec --json` inside named `tmux` sessions, defaulting to xhigh reasoning and yolo mode.
+- Stashes current local Git changes before pulling the VPS worktree back when the local workspace has changed after the last push.
 
 ## Setup
 
@@ -34,6 +40,11 @@ AGENT_RUNNER_REMOTE_PORT=22
 AGENT_RUNNER_REMOTE_PASSWORD=your-vps-password
 AGENT_RUNNER_REMOTE_ROOT=~/agent-runner
 AGENT_RUNNER_CODEX_AUTH_SOURCE=~/.codex/auth.json
+DIGITALOCEAN_TOKEN=dop_v1_...
+AGENT_RUNNER_DO_REGION=sgp1
+AGENT_RUNNER_DO_SIZE=s-2vcpu-4gb
+AGENT_RUNNER_DO_IMAGE=ubuntu-24-04-x64
+AGENT_RUNNER_DO_DROPLET_NAME=agent-runner-my-project
 ```
 
 Then initialize per-project config:
@@ -42,11 +53,27 @@ Then initialize per-project config:
 agent-runner init
 ```
 
-This creates `.agent-runner.json`. Environment values provide secrets and host-specific defaults; the project config can override non-secret defaults such as the project slug, remote root, Codex flags, devcontainer flags, and rsync excludes.
+This creates `.agent-runner.json`. Environment values provide secrets and host-specific defaults; the project config can override non-secret defaults such as the project slug, remote root, Codex flags, devcontainer flags, and rsync excludes. Codex tasks default to `reasoningEffort: "xhigh"` and `yolo: true`.
 
 Password auth uses `sshpass` with the password passed through the `SSHPASS` environment variable. The password is not put into command arguments or dry-run output. `doctor` checks for local tools and config only; it does not attempt to log into the VPS.
 
+For managed DigitalOcean droplets, `DIGITALOCEAN_TOKEN` is used only for API calls. The CLI generates a local SSH key under `~/.agent-runner/keys`, uploads the public key to DigitalOcean when needed, and records the active droplet under `~/.agent-runner/digitalocean/<project>.json`. Once that state exists, normal remote commands target the managed droplet even if `.env` still has an old `AGENT_RUNNER_REMOTE_HOST`.
+
 ## Commands
+
+Normal managed-DigitalOcean flow:
+
+```bash
+agent-runner start "prompt"
+agent-runner start --prompt-file prompt.md
+agent-runner status
+agent-runner logs
+agent-runner finish
+```
+
+Use either inline prompt form or `--prompt-file`, not both. `start` creates a managed droplet if there is no active/configured remote, pushes the project, starts the remote devcontainer, and launches Codex. Use `--prompt-file prompt.md` for larger prompts or contracts; use `--prompt-file -` to read the prompt from stdin. `finish` pulls the VPS worktree back and destroys the active managed droplet. Use `finish --keep-droplet` if you want to pull without destroying.
+
+Lower-level commands:
 
 ```bash
 agent-runner doctor
@@ -54,12 +81,83 @@ agent-runner bootstrap
 agent-runner push
 agent-runner up
 agent-runner run "prompt"
+agent-runner run --prompt-file prompt.md
 agent-runner status
 agent-runner logs
 agent-runner attach
 agent-runner stop
 agent-runner pull
 ```
+
+### Lower-Level Command Notes
+
+`doctor` checks local prerequisites, project config, Codex auth, and whether a DigitalOcean token is available. It does not SSH into a VPS.
+
+`bootstrap` prepares an already-configured remote host by installing/checking host tools such as Docker, Node/npm, Dev Containers CLI, Codex, `rsync`, and `tmux`. Managed droplets run this automatically during `droplet create`.
+
+`push` mirrors the current project directory to the remote host and copies your Codex auth cache into the remote runner secrets directory. It records a local manifest so later pulls can tell whether your local tree changed.
+
+`up` starts the project devcontainer on the remote host and injects Codex auth into the devcontainer user's home. It also installs Codex inside the devcontainer when needed.
+
+`run "prompt"` starts a remote Codex task inside a named `tmux` session and returns immediately. Codex output is written to a JSONL log file under the remote runner log directory. For larger prompts, use a file or stdin:
+
+```bash
+agent-runner run --prompt-file prompt.md
+cat prompt.md | agent-runner run --prompt-file -
+```
+
+`status` prints the latest task status, or a specific task if you pass a task id. It reports whether the task is running, completed, or failed, plus the exit code and remote log path when available.
+
+```bash
+agent-runner status
+agent-runner status 20260616T075216Z-62c8b4
+```
+
+`logs` prints the Codex JSONL log for the latest task, or a specific task id. Use `-n` to tail the last N lines.
+
+```bash
+agent-runner logs
+agent-runner logs -n 80
+agent-runner logs 20260616T075216Z-62c8b4 -n 80
+```
+
+For a live-ish log view, use your shell's `watch` command:
+
+```bash
+watch -n 2 'agent-runner logs -n 40'
+```
+
+`attach` connects directly to the remote `tmux` session for a task. This is the closest thing to a live view of the remote job, and it is useful when you want to inspect the session itself. The Codex task still writes its main output to the JSONL log file, so `logs` is usually the cleaner way to read what happened.
+
+```bash
+agent-runner attach
+agent-runner attach 20260616T075216Z-62c8b4
+```
+
+Detach from `tmux` with `Ctrl-b`, then `d`.
+
+`stop` kills the remote `tmux` session for the latest task, or a specific task id.
+
+```bash
+agent-runner stop
+agent-runner stop 20260616T075216Z-62c8b4
+```
+
+`pull` syncs the VPS worktree back to your local project. If your local project changed since the last `push`, it first runs `git stash push --include-untracked`, preserves that stash across the incoming `.git` replacement, then restores it into the pulled repo's stash list.
+
+DigitalOcean lifecycle:
+
+```bash
+agent-runner droplet create
+agent-runner droplet status
+agent-runner push
+agent-runner up
+agent-runner run "prompt"
+agent-runner pull
+agent-runner droplet destroy --yes
+```
+
+`droplet create` creates a default `s-2vcpu-4gb` Ubuntu droplet, waits for SSH, and runs the same remote bootstrap used for manually-created VPS hosts. After you pull the finished work back, `droplet destroy --yes` deletes the active droplet.
 
 Useful global flags:
 
@@ -85,13 +183,15 @@ Local state lives in:
 
 ```text
 ~/.agent-runner/state/<project-slug>.json
+~/.agent-runner/digitalocean/<project-slug>.json
+~/.agent-runner/keys/<project-slug>_ed25519
 ```
 
 ## Safety Model
 
-`push` records a manifest of the local project before mirroring it to the VPS. `pull` recomputes the local manifest and refuses to continue if the local project no longer matches the last pushed manifest.
+`push` records a manifest of the local project before mirroring it to the VPS. `pull` recomputes the local manifest and, if the local project no longer matches the last pushed manifest, runs `git stash push --include-untracked` before syncing the VPS worktree back.
 
-That means remote changes are not allowed to silently overwrite new local Codespace edits. Commit, stash, or otherwise back up local work before pulling.
+That means remote changes can replace the local worktree while your tracked and untracked local edits remain recoverable in the Git stash for a normal local merge or apply flow.
 
 ## Development
 

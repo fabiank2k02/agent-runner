@@ -19,6 +19,7 @@ export async function doctor(context: CommandContext): Promise<DoctorResult> {
 
   checks.push(await commandCheck(executor, "ssh", ["-V"], "ssh"));
   checks.push(await commandCheck(executor, "rsync", ["--version"], "rsync"));
+  checks.push(await commandCheck(executor, "sh", ["-lc", "command -v ssh-keygen"], "ssh-keygen"));
   if (config.remote.password) {
     checks.push(await commandCheck(executor, "sshpass", ["-V"], "sshpass"));
   }
@@ -56,6 +57,13 @@ export async function doctor(context: CommandContext): Promise<DoctorResult> {
     detail: fs.existsSync(config.codexAuthSource)
       ? config.codexAuthSource
       : `${config.codexAuthSource} does not exist`
+  });
+  checks.push({
+    name: "DigitalOcean token",
+    ok: true,
+    detail: config.digitalOcean.token
+      ? "DIGITALOCEAN_TOKEN or AGENT_RUNNER_DO_TOKEN is set"
+      : "not set; required only for droplet create/destroy"
   });
 
   return {

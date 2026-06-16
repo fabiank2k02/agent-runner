@@ -28,10 +28,20 @@ export function fakeConfig(projectRoot: string): ResolvedConfig {
     codex: {
       sandbox: "workspace-write",
       approval: "never",
+      reasoningEffort: "xhigh",
+      yolo: true,
       extraArgs: []
     },
     rsync: {
       excludes: []
+    },
+    digitalOcean: {
+      token: "do-token",
+      region: "sgp1",
+      size: "s-2vcpu-4gb",
+      image: "ubuntu-24-04-x64",
+      dropletName: "agent-runner-sample",
+      tags: ["agent-runner"]
     },
     configPath: path.join(projectRoot, ".agent-runner.json")
   };

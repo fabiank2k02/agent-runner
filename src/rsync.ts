@@ -17,15 +17,13 @@ export interface RsyncArgsOptions {
 }
 
 export function buildRsyncArgs(config: ResolvedConfig, options: RsyncArgsOptions): string[] {
-  const sshParts = ["ssh", "-p", String(config.remote.port)];
+  const sshParts = ["ssh", "-p", String(config.remote.port), "-o", "StrictHostKeyChecking=accept-new"];
   if (config.remote.password) {
     sshParts.push(
       "-o",
       "PreferredAuthentications=password",
       "-o",
-      "PubkeyAuthentication=no",
-      "-o",
-      "StrictHostKeyChecking=accept-new"
+      "PubkeyAuthentication=no"
     );
   } else if (config.remote.sshKey) {
     sshParts.push("-i", config.remote.sshKey);

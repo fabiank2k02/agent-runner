@@ -1,8 +1,11 @@
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { CommandContext } from "../context.js";
 import { createProjectManifest } from "../manifest.js";
 import { dirnameRemote, quoteRemotePath } from "../quote.js";
 import { runRsync } from "../rsync.js";
+import { requireSuccess } from "../shell.js";
 import {
   readLocalState,
   stateFromPull,
@@ -47,14 +50,9 @@ export async function pullProject(context: CommandContext): Promise<string> {
   }
 
   const current = await createProjectManifest(config.projectRoot);
+  let stash: LocalStash | undefined;
   if (current.digest !== existing.lastPushedManifest.digest) {
-    throw new Error(
-      [
-        "Refusing to pull because the local workspace changed after the last push.",
-        `Expected manifest ${existing.lastPushedManifest.digest}, got ${current.digest}.`,
-        "Commit, stash, or back up local changes before pulling remote work back."
-      ].join("\n")
-    );
+    stash = await stashLocalChanges(context, current.digest);
   }
 
   await runRsync(config, executor, {
@@ -65,7 +63,79 @@ export async function pullProject(context: CommandContext): Promise<string> {
     extraExcludes: config.rsync.excludes
   });
 
+  if (stash) {
+    await restoreLocalStash(context, stash);
+  }
+
   const updated = await createProjectManifest(config.projectRoot);
   await writeLocalState(layout, stateFromPull(layout, updated, existing));
   return updated.digest;
+}
+
+interface LocalStash {
+  message: string;
+  bundlePath: string;
+}
+
+async function stashLocalChanges(context: CommandContext, digest: string): Promise<LocalStash | undefined> {
+  const { config, executor, dryRun } = context;
+  const status = await requireSuccess(
+    executor.run("git", ["status", "--porcelain", "--untracked-files=all"], {
+      cwd: config.projectRoot,
+      dryRun
+    }),
+    "Unable to check local git status before pulling from the VPS"
+  );
+
+  if (!status.stdout.trim()) {
+    return undefined;
+  }
+
+  const timestamp = new Date().toISOString();
+  const message = `agent-runner pre-pull ${timestamp} ${digest}`;
+  await requireSuccess(
+    executor.run(
+      "git",
+      ["stash", "push", "--include-untracked", "-m", message],
+      {
+        cwd: config.projectRoot,
+        dryRun
+      }
+    ),
+    "Unable to stash local changes before pulling from the VPS"
+  );
+
+  if (dryRun) {
+    return undefined;
+  }
+
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "agent-runner-stash-"));
+  const bundlePath = path.join(tempDir, "stash.bundle");
+  await requireSuccess(
+    executor.run("git", ["bundle", "create", bundlePath, "refs/stash"], {
+      cwd: config.projectRoot
+    }),
+    "Unable to preserve local stash before pulling from the VPS"
+  );
+  return { message, bundlePath };
+}
+
+async function restoreLocalStash(context: CommandContext, stash: LocalStash): Promise<void> {
+  const { config, executor } = context;
+  try {
+    await requireSuccess(
+      executor.run("git", ["fetch", stash.bundlePath, "refs/stash"], {
+        cwd: config.projectRoot
+      }),
+      "Unable to import preserved local stash after pulling from the VPS"
+    );
+    await requireSuccess(
+      executor.run("git", ["stash", "store", "-m", stash.message, "FETCH_HEAD"], {
+        cwd: config.projectRoot
+      }),
+      "Unable to restore local stash after pulling from the VPS"
+    );
+  } finally {
+    await fs.promises.rm(path.dirname(stash.bundlePath), { recursive: true, force: true });
+  }
 }

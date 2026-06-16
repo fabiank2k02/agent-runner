@@ -18,8 +18,9 @@ install_codex() {
     sudo npm install -g @openai/codex
     return $?
   fi
-  return 1
+  npm install -g --prefix "$HOME/.local" @openai/codex
 }
+export PATH="$HOME/.local/bin:$PATH"
 if ! command -v codex >/dev/null 2>&1; then
   if command -v npm >/dev/null 2>&1; then
     install_codex

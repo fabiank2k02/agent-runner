@@ -19,6 +19,7 @@ describe("buildRsyncArgs", () => {
     expect(args).toContain(".agent-runner/tmp/");
     expect(args).toContain("custom-cache/");
     const sshTransport = args[args.indexOf("-e") + 1];
+    expect(sshTransport).toContain("StrictHostKeyChecking=accept-new");
     expect(sshTransport).toContain("PreferredAuthentications=password");
     expect(sshTransport).toContain("PubkeyAuthentication=no");
     expect(args).not.toContain("secret");

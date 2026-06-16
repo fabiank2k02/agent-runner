@@ -4,6 +4,7 @@ import process from "node:process";
 import { config as loadDotenv } from "dotenv";
 import { z } from "zod";
 import { expandHome, projectSlugFromPath } from "./paths.js";
+import { readDigitalOceanStateSync } from "./infra-state.js";
 
 const configFileSchema = z
   .object({
@@ -28,15 +29,26 @@ const configFileSchema = z
       .object({
         sandbox: z.string().min(1).default("workspace-write"),
         approval: z.string().min(1).default("never"),
+        reasoningEffort: z.string().min(1).default("xhigh"),
+        yolo: z.boolean().default(true),
         model: z.string().min(1).optional(),
         extraArgs: z.array(z.string()).default([])
       })
-      .default({ sandbox: "workspace-write", approval: "never", extraArgs: [] }),
+      .default({ sandbox: "workspace-write", approval: "never", reasoningEffort: "xhigh", yolo: true, extraArgs: [] }),
     rsync: z
       .object({
         excludes: z.array(z.string()).default([])
       })
-      .default({ excludes: [] })
+      .default({ excludes: [] }),
+    digitalOcean: z
+      .object({
+        region: z.string().min(1).optional(),
+        size: z.string().min(1).optional(),
+        image: z.string().min(1).optional(),
+        dropletName: z.string().min(1).optional(),
+        tags: z.array(z.string()).default(["agent-runner"])
+      })
+      .default({ tags: ["agent-runner"] })
   });
 
 export type AgentRunnerConfigFile = z.infer<typeof configFileSchema>;
@@ -59,11 +71,21 @@ export interface ResolvedConfig {
   codex: {
     sandbox: string;
     approval: string;
+    reasoningEffort: string;
+    yolo: boolean;
     model?: string;
     extraArgs: string[];
   };
   rsync: {
     excludes: string[];
+  };
+  digitalOcean: {
+    token?: string;
+    region: string;
+    size: string;
+    image: string;
+    dropletName: string;
+    tags: string[];
   };
   configPath: string;
 }
@@ -97,6 +119,8 @@ export function resolveConfig(projectRootInput = process.cwd()): ResolvedConfig 
   const projectRoot = path.resolve(projectRootInput);
   loadEnvironment(projectRoot);
   const fileConfig = readConfigFile(projectRoot);
+  const projectSlug = fileConfig.projectSlug ?? projectSlugFromPath(projectRoot);
+  const digitalOceanState = readDigitalOceanStateSync(projectSlug);
 
   const remoteRoot =
     fileConfig.remote?.root ?? process.env.AGENT_RUNNER_REMOTE_ROOT ?? "~/agent-runner";
@@ -107,21 +131,44 @@ export function resolveConfig(projectRootInput = process.cwd()): ResolvedConfig 
 
   return {
     projectRoot,
-    projectSlug: fileConfig.projectSlug ?? projectSlugFromPath(projectRoot),
+    projectSlug,
     remote: {
-      host: fileConfig.remote?.host ?? process.env.AGENT_RUNNER_REMOTE_HOST,
-      user: fileConfig.remote?.user ?? process.env.AGENT_RUNNER_REMOTE_USER,
+      host:
+        digitalOceanState?.activeDroplet?.ip ??
+        fileConfig.remote?.host ??
+        process.env.AGENT_RUNNER_REMOTE_HOST,
+      user:
+        digitalOceanState?.activeDroplet?.user ??
+        fileConfig.remote?.user ??
+        process.env.AGENT_RUNNER_REMOTE_USER,
       port:
         fileConfig.remote?.port ??
         Number.parseInt(process.env.AGENT_RUNNER_REMOTE_PORT ?? "22", 10),
-      sshKey: fileConfig.remote?.sshKey ?? process.env.AGENT_RUNNER_REMOTE_SSH_KEY,
-      password: fileConfig.remote?.password ?? process.env.AGENT_RUNNER_REMOTE_PASSWORD,
+      sshKey:
+        digitalOceanState?.activeDroplet?.sshKeyPath ??
+        fileConfig.remote?.sshKey ??
+        process.env.AGENT_RUNNER_REMOTE_SSH_KEY,
+      password:
+        digitalOceanState?.activeDroplet
+          ? undefined
+          : fileConfig.remote?.password ?? process.env.AGENT_RUNNER_REMOTE_PASSWORD,
       root: remoteRoot
     },
     codexAuthSource: expandHome(codexAuthSource),
     devcontainer: fileConfig.devcontainer,
     codex: fileConfig.codex,
     rsync: fileConfig.rsync,
+    digitalOcean: {
+      token: process.env.AGENT_RUNNER_DO_TOKEN ?? process.env.DIGITALOCEAN_TOKEN,
+      region: fileConfig.digitalOcean.region ?? process.env.AGENT_RUNNER_DO_REGION ?? "sgp1",
+      size: fileConfig.digitalOcean.size ?? process.env.AGENT_RUNNER_DO_SIZE ?? "s-2vcpu-4gb",
+      image: fileConfig.digitalOcean.image ?? process.env.AGENT_RUNNER_DO_IMAGE ?? "ubuntu-24-04-x64",
+      dropletName:
+        fileConfig.digitalOcean.dropletName ??
+        process.env.AGENT_RUNNER_DO_DROPLET_NAME ??
+        `agent-runner-${projectSlug}`,
+      tags: fileConfig.digitalOcean.tags
+    },
     configPath: path.join(projectRoot, configFileName)
   };
 }
@@ -140,10 +187,15 @@ export function createDefaultConfig(projectRoot: string): AgentRunnerConfigFile 
     codex: {
       sandbox: "workspace-write",
       approval: "never",
+      reasoningEffort: "xhigh",
+      yolo: true,
       extraArgs: []
     },
     rsync: {
       excludes: []
+    },
+    digitalOcean: {
+      tags: ["agent-runner"]
     }
   };
 }

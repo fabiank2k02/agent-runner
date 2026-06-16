@@ -1,6 +1,12 @@
+import fs from "node:fs";
 import path from "node:path";
 import { Command } from "commander";
 import { bootstrap } from "./commands/bootstrap.js";
+import {
+  createDroplet,
+  dropletStatus,
+  destroyDroplet
+} from "./commands/droplet.js";
 import { doctor } from "./commands/doctor.js";
 import { initProject } from "./commands/init.js";
 import { pullProject, pushProject } from "./commands/sync.js";
@@ -72,7 +78,7 @@ export function buildProgram(): Command {
 
   program
     .command("pull")
-    .description("Sync remote VPS changes back, refusing if the local project diverged")
+    .description("Sync remote VPS changes back, stashing local changes first if needed")
     .action(async () => {
       const globals = getGlobals(program);
       const digest = await pullProject(createContext(globals));
@@ -91,12 +97,42 @@ export function buildProgram(): Command {
   program
     .command("run")
     .description("Run a long Codex task remotely inside tmux")
-    .argument("<prompt>", "task prompt")
+    .argument("[prompt]", "task prompt")
+    .option("-f, --prompt-file <path>", "read the task prompt from a file, or '-' for stdin")
     .option("--task-id <id>", "explicit task id for reproducible automation")
-    .action(async (prompt: string, options: { taskId?: string }) => {
+    .action(async (prompt: string | undefined, options: { promptFile?: string; taskId?: string }) => {
       const globals = getGlobals(program);
-      const result = await runTask(createContext(globals), prompt, { taskId: options.taskId });
+      const resolvedPrompt = await resolvePrompt(globals, prompt, options.promptFile);
+      const result = await runTask(createContext(globals), resolvedPrompt, { taskId: options.taskId });
       write(globals, result, `started ${result.sessionName}\nlog: ${result.logFile}`);
+    });
+
+  program
+    .command("start")
+    .description("Create a managed droplet if needed, push, start the devcontainer, and run Codex")
+    .argument("[prompt]", "task prompt")
+    .option("-f, --prompt-file <path>", "read the task prompt from a file, or '-' for stdin")
+    .option("--task-id <id>", "explicit task id for reproducible automation")
+    .option("--no-create", "use the configured/active remote instead of creating a managed droplet")
+    .option("--skip-up", "skip devcontainer startup/authentication")
+    .action(
+      async (
+        prompt: string | undefined,
+        options: { promptFile?: string; taskId?: string; create?: boolean; skipUp?: boolean }
+      ) => {
+        const globals = getGlobals(program);
+        const resolvedPrompt = await resolvePrompt(globals, prompt, options.promptFile);
+        await startTask(globals, resolvedPrompt, options);
+      }
+    );
+
+  program
+    .command("finish")
+    .description("Pull remote work back and destroy the active managed droplet")
+    .option("--keep-droplet", "pull work back without destroying the managed droplet")
+    .action(async (options: { keepDroplet?: boolean }) => {
+      const globals = getGlobals(program);
+      await finishTask(globals, options);
     });
 
   program
@@ -141,6 +177,54 @@ export function buildProgram(): Command {
       write(globals, { ok: true }, "task stopped");
     });
 
+  const droplet = program
+    .command("droplet")
+    .description("Manage the DigitalOcean droplet backing this project");
+
+  droplet
+    .command("create")
+    .description("Create a new DigitalOcean droplet, wait for SSH, and bootstrap it")
+    .option("--name <name>", "droplet name")
+    .option("--region <slug>", "DigitalOcean region slug")
+    .option("--size <slug>", "DigitalOcean size slug")
+    .option("--image <image>", "base image slug or id")
+    .option("--no-bootstrap", "create and wait for SSH without running bootstrap")
+    .action(async (options: { name?: string; region?: string; size?: string; image?: string; bootstrap?: boolean }) => {
+      const globals = getGlobals(program);
+      const result = await createDroplet(createContext(globals).config, {
+        name: options.name,
+        region: options.region,
+        size: options.size,
+        image: parseImage(options.image),
+        skipBootstrap: options.bootstrap === false
+      });
+      write(globals, result, formatDropletCreated(result));
+    });
+
+  droplet
+    .command("status")
+    .description("Show the active managed droplet")
+    .action(async () => {
+      const globals = getGlobals(program);
+      const status = await dropletStatus(createContext(globals).config);
+      write(globals, status, JSON.stringify(status, null, 2));
+    });
+
+  droplet
+    .command("destroy")
+    .alias("shutdown")
+    .description("Destroy the active managed droplet")
+    .requiredOption("--yes", "confirm that the active droplet should be destroyed")
+    .action(async (options: { yes: boolean }) => {
+      const globals = getGlobals(program);
+      const result = await destroyDroplet(createContext(globals).config, { yes: options.yes });
+      write(
+        globals,
+        result,
+        `droplet ${result.dropletId} destroyed`
+      );
+    });
+
   return program;
 }
 
@@ -150,6 +234,69 @@ function getGlobals(program: Command): GlobalOptions {
 
 function createContext(options: GlobalOptions) {
   return createCommandContext(path.resolve(options.cwd), { dryRun: options.dryRun });
+}
+
+async function resolvePrompt(
+  globals: GlobalOptions,
+  prompt: string | undefined,
+  promptFile: string | undefined
+): Promise<string> {
+  if (promptFile && prompt) {
+    throw new Error("Pass either a prompt argument or --prompt-file, not both.");
+  }
+  if (promptFile === "-") {
+    return readStdin();
+  }
+  if (promptFile) {
+    return fs.promises.readFile(path.resolve(globals.cwd, promptFile), "utf8");
+  }
+  if (prompt) {
+    return prompt;
+  }
+  throw new Error("Pass a prompt argument or --prompt-file <path>.");
+}
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function startTask(
+  globals: GlobalOptions,
+  prompt: string,
+  options: { taskId?: string; create?: boolean; skipUp?: boolean }
+): Promise<void> {
+  const initialContext = createContext(globals);
+  if (options.create !== false && !initialContext.config.remote.host) {
+    const created = await createDroplet(initialContext.config);
+    write(globals, created, formatDropletCreated(created));
+  }
+
+  const context = createContext(globals);
+  const digest = await pushProject(context);
+  write(globals, { digest }, `pushed workspace manifest ${digest}`);
+
+  if (!options.skipUp) {
+    await upDevcontainer(context);
+    write(globals, { ok: true }, "remote devcontainer is ready");
+  }
+
+  const result = await runTask(context, prompt, { taskId: options.taskId });
+  write(globals, result, `started ${result.sessionName}\nlog: ${result.logFile}`);
+}
+
+async function finishTask(globals: GlobalOptions, options: { keepDroplet?: boolean }): Promise<void> {
+  const context = createContext(globals);
+  const digest = await pullProject(context);
+  write(globals, { digest }, `pulled workspace manifest ${digest}`);
+
+  if (!options.keepDroplet) {
+    const result = await destroyDroplet(context.config, { yes: true });
+    write(globals, result, `droplet ${result.dropletId} destroyed`);
+  }
 }
 
 function write(options: GlobalOptions, value: unknown, text: string): void {
@@ -172,4 +319,22 @@ function parseInteger(value: string): number {
     throw new Error(`Expected a positive integer, got ${value}`);
   }
   return parsed;
+}
+
+function parseImage(value: string | undefined): string | number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const numeric = Number(value);
+  return Number.isInteger(numeric) && numeric > 0 ? numeric : value;
+}
+
+function formatDropletCreated(result: Awaited<ReturnType<typeof createDroplet>>): string {
+  return [
+    `droplet ${result.dropletId} (${result.name}) is ready`,
+    `ip: ${result.ip}`,
+    `region: ${result.region}`,
+    `size: ${result.size}`,
+    `bootstrapped: ${result.bootstrapped ? "yes" : "no"}`
+  ].join("\n");
 }

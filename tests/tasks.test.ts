@@ -25,6 +25,13 @@ describe("tasks", () => {
     expect(result.sessionName).toBe(sessionName("sample", "task-1"));
     expect(remote.writes.get("~/agent-runner/logs/sample/task-1.prompt.txt")).toBe("finish the feature");
     expect(remote.commands.some((command) => command.includes("tmux new-session"))).toBe(true);
+    expect(remote.writes.get("~/agent-runner/logs/sample/task-1.run.sh")).toContain(
+      "model_reasoning_effort=\"xhigh\""
+    );
+    expect(remote.writes.get("~/agent-runner/logs/sample/task-1.run.sh")).toContain(
+      "--dangerously-bypass-approvals-and-sandbox"
+    );
+    expect(remote.writes.get("~/agent-runner/logs/sample/task-1.run.sh")).toContain("< /dev/null");
     expect(state.lastTask.taskId).toBe("task-1");
     expect(state.lastTask.logFile).toBe("~/agent-runner/logs/sample/task-1.jsonl");
   });

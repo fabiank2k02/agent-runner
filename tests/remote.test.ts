@@ -9,11 +9,11 @@ describe("buildSshArgs", () => {
       "-p",
       "2222",
       "-o",
+      "StrictHostKeyChecking=accept-new",
+      "-o",
       "PreferredAuthentications=password",
       "-o",
       "PubkeyAuthentication=no",
-      "-o",
-      "StrictHostKeyChecking=accept-new",
       "ubuntu@vps.example.com",
       "echo ok"
     ]);

@@ -39,10 +39,16 @@ export async function runTask(context: CommandContext, prompt: string, options: 
     "codex",
     "exec",
     "--json",
-    "--sandbox",
-    shellQuote(config.codex.sandbox),
-    "--ask-for-approval",
-    shellQuote(config.codex.approval),
+    "-c",
+    shellQuote(`model_reasoning_effort=${JSON.stringify(config.codex.reasoningEffort)}`),
+    ...(config.codex.yolo
+      ? ["--dangerously-bypass-approvals-and-sandbox"]
+      : [
+          "--sandbox",
+          shellQuote(config.codex.sandbox),
+          "-c",
+          shellQuote(`approval_policy=${JSON.stringify(config.codex.approval)}`)
+        ]),
     ...(config.codex.model ? ["--model", shellQuote(config.codex.model)] : []),
     ...config.codex.extraArgs.map(shellQuote)
   ].join(" ");
@@ -72,7 +78,7 @@ write_status() {
 }
 write_status running null null
 prompt="$(cat "$PROMPT_FILE")"
-devcontainer exec --workspace-folder "$WORKSPACE" ${codexCommand} "$prompt" > "$LOG_FILE" 2>&1
+devcontainer exec --workspace-folder "$WORKSPACE" sh -lc ${shellQuote(`PATH="$HOME/.local/bin:$PATH" ${codexCommand} "$0"`)} "$prompt" < /dev/null > "$LOG_FILE" 2>&1
 code=$?
 finished=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 if [ "$code" -eq 0 ]; then

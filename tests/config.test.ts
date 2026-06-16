@@ -29,6 +29,8 @@ describe("resolveConfig", () => {
         codex: {
           sandbox: "danger-full-access",
           approval: "never",
+          yolo: false,
+          reasoningEffort: "high",
           extraArgs: ["--search"]
         }
       })
@@ -42,7 +44,20 @@ describe("resolveConfig", () => {
     expect(config.remote.password).toBe("env-password");
     expect(config.remote.root).toBe("~/custom-root");
     expect(config.codex.sandbox).toBe("danger-full-access");
+    expect(config.codex.yolo).toBe(false);
+    expect(config.codex.reasoningEffort).toBe("high");
     expect(config.codex.extraArgs).toEqual(["--search"]);
+    expect(config.digitalOcean.region).toBe("sgp1");
+    expect(config.digitalOcean.size).toBe("s-2vcpu-4gb");
+  });
+
+  it("defaults Codex to xhigh reasoning and yolo mode", async () => {
+    const root = await tempDir("config-defaults");
+
+    const config = resolveConfig(root);
+
+    expect(config.codex.reasoningEffort).toBe("xhigh");
+    expect(config.codex.yolo).toBe(true);
   });
 
   it("loads .env.local over .env", async () => {
