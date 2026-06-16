@@ -15,6 +15,7 @@ export async function createDroplet(config, options = {}, executor = new RealShe
     const region = options.region ?? config.digitalOcean.region;
     const size = options.size ?? config.digitalOcean.size;
     const image = options.image ?? config.digitalOcean.image;
+    const hourlyPriceUsd = await client.getSize(size).then((result) => result?.price_hourly).catch(() => undefined);
     if (state?.activeDroplet) {
         const refresh = await refreshManagedDroplet(config);
         if (refresh.active) {
@@ -40,6 +41,7 @@ export async function createDroplet(config, options = {}, executor = new RealShe
         ip,
         region,
         size,
+        hourlyPriceUsd,
         image,
         user: "root",
         sshKeyPath: sshKey.privateKeyPath,
@@ -133,7 +135,8 @@ export async function refreshManagedDroplet(config) {
                 locked: droplet.locked,
                 ip: publicIpv4(droplet),
                 region: droplet.region.slug,
-                size: droplet.size_slug
+                size: droplet.size_slug,
+                hourlyPriceUsd: state.activeDroplet.hourlyPriceUsd
             }
         };
     }

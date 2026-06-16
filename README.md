@@ -27,6 +27,7 @@ agent-runner finish
 - Copies your local Codex auth cache from `~/.codex/auth.json` to `~/agent-runner/secrets/codex/auth.json` on the VPS with mode `600`.
 - Injects that auth cache into the devcontainer user home, never into the project workspace.
 - Runs long Codex tasks with `codex exec --json` inside named `tmux` sessions, defaulting to xhigh reasoning and yolo mode.
+- Can launch an isolated dashboard observer that summarizes task progress and posts it to a Cloudflare Pages dashboard.
 - Stashes current local Git changes before pulling the VPS worktree back when the local workspace has changed after the last push.
 
 ## Setup
@@ -45,6 +46,12 @@ AGENT_RUNNER_DO_REGION=sgp1
 AGENT_RUNNER_DO_SIZE=s-2vcpu-4gb
 AGENT_RUNNER_DO_IMAGE=ubuntu-24-04-x64
 AGENT_RUNNER_DO_DROPLET_NAME=agent-runner-my-project
+AGENT_RUNNER_DASHBOARD_ENDPOINT=https://agent-runner-dashboard.pages.dev/api/ingest
+AGENT_RUNNER_DASHBOARD_TOKEN=your-shared-dashboard-token
+AGENT_RUNNER_DASHBOARD_MODEL=gpt-5.4-mini
+AGENT_RUNNER_DASHBOARD_DO_HOURLY_USD=
+AGENT_RUNNER_CODEX_SUBSCRIPTION_USD=
+AGENT_RUNNER_CODEX_SUBSCRIPTION_TOKENS=
 ```
 
 Then initialize per-project config:
@@ -58,6 +65,10 @@ This creates `.agent-runner.json`. Environment values provide secrets and host-s
 Password auth uses `sshpass` with the password passed through the `SSHPASS` environment variable. The password is not put into command arguments or dry-run output. `doctor` checks for local tools and config only; it does not attempt to log into the VPS.
 
 For managed DigitalOcean droplets, `DIGITALOCEAN_TOKEN` is used only for API calls. The CLI generates a local SSH key under `~/.agent-runner/keys`, uploads the public key to DigitalOcean when needed, and records the active droplet under `~/.agent-runner/digitalocean/<project>.json`. Once that state exists, normal remote commands target the managed droplet even if `.env` still has an old `AGENT_RUNNER_REMOTE_HOST`.
+
+Dashboard reporting is optional and automatic. If `AGENT_RUNNER_DASHBOARD_ENDPOINT` and `AGENT_RUNNER_DASHBOARD_TOKEN` are set, `run` and `start` launch a separate observer tmux session. That observer uses its own `CODEX_HOME`, reads only the task prompt/status/log tail, and posts structured updates to the dashboard endpoint. Set `AGENT_RUNNER_DASHBOARD_MODEL` to a cheap mini model for these summaries. Leave endpoint or token unset to disable it, or set `dashboard.enabled` to `false` in `.agent-runner.json`.
+
+Cost estimates are also optional. Managed DigitalOcean runs record the droplet size's `price_hourly` when available. Override it with `AGENT_RUNNER_DASHBOARD_DO_HOURLY_USD` if needed. Codex subscription cost is estimated as observed task tokens multiplied by `AGENT_RUNNER_CODEX_SUBSCRIPTION_USD / AGENT_RUNNER_CODEX_SUBSCRIPTION_TOKENS`.
 
 ## Commands
 
@@ -173,11 +184,42 @@ agent-runner --json status
 ~/agent-runner/
   projects/<project-slug>/
   logs/<project-slug>/<task-id>.jsonl
+  logs/<project-slug>/<task-id>.observer.log
+  logs/<project-slug>/<task-id>.summary.json
   logs/<project-slug>/<task-id>.status.json
   logs/<project-slug>/<task-id>.prompt.txt
+  observer/<project-slug>/<task-id>/codex-home/
   secrets/codex/auth.json
   state/<project-slug>.json
 ```
+
+## Dashboard
+
+The first-party Cloudflare Pages dashboard lives in `dashboard/`. It provides token-protected endpoints for consolidated job state:
+
+```text
+POST /api/ingest
+GET  /api/jobs
+GET  /api/jobs/:id
+```
+
+Deploy setup:
+
+```bash
+cd dashboard
+npm install
+npm run db:create
+# copy the returned database_id into dashboard/wrangler.toml
+npm run db:migrate
+npm run wrangler -- pages secret put AGENT_RUNNER_DASHBOARD_TOKEN --project-name agent-runner-dashboard
+npm run deploy
+```
+
+The dashboard scripts accept either `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_TOKEN`. Use the deployed Pages URL plus `/api/ingest` as `AGENT_RUNNER_DASHBOARD_ENDPOINT` in each repo that should report progress.
+
+The Cloudflare token needs account-level D1 edit and Pages edit permissions. Account Settings read and User Memberships read let Wrangler discover the account automatically.
+
+For the public dashboard, put Cloudflare Access in front of the Pages hostname using Cloudflare as the identity provider, with account-member restriction enabled. Keep `/api/ingest` as a more-specific Access bypass application so runners can post updates with `AGENT_RUNNER_DASHBOARD_TOKEN` without a browser login. Dashboard read APIs can then rely on the Access session instead of a second browser token.
 
 Local state lives in:
 

@@ -47,7 +47,31 @@ const configFileSchema = z
         dropletName: z.string().min(1).optional(),
         tags: z.array(z.string()).default([])
     })
-        .default({ tags: [] })
+        .default({ tags: [] }),
+    dashboard: z
+        .object({
+        enabled: z.boolean().optional(),
+        endpoint: z.string().url().optional(),
+        tokenEnv: z.string().min(1).default("AGENT_RUNNER_DASHBOARD_TOKEN"),
+        intervalSeconds: z.coerce.number().int().min(15).default(60),
+        model: z.string().min(1).optional(),
+        reasoningEffort: z.string().min(1).default("low"),
+        maxLogLines: z.coerce.number().int().min(20).max(1000).default(200),
+        costs: z
+            .object({
+            digitalOceanHourlyUsd: z.coerce.number().positive().optional(),
+            codexSubscriptionMonthlyUsd: z.coerce.number().positive().optional(),
+            codexSubscriptionMonthlyTokens: z.coerce.number().positive().optional()
+        })
+            .default({})
+    })
+        .default({
+        tokenEnv: "AGENT_RUNNER_DASHBOARD_TOKEN",
+        intervalSeconds: 60,
+        reasoningEffort: "low",
+        maxLogLines: 200,
+        costs: {}
+    })
 });
 export const configFileName = ".agent-runner.json";
 export function loadEnvironment(projectRoot) {
@@ -79,6 +103,11 @@ export function resolveConfig(projectRootInput = process.cwd()) {
     const codexAuthSource = fileConfig.codexAuthSource ??
         process.env.AGENT_RUNNER_CODEX_AUTH_SOURCE ??
         "~/.codex/auth.json";
+    const dashboardEndpoint = fileConfig.dashboard.endpoint ?? process.env.AGENT_RUNNER_DASHBOARD_ENDPOINT;
+    const dashboardToken = process.env[fileConfig.dashboard.tokenEnv];
+    const digitalOceanHourlyUsd = fileConfig.dashboard.costs.digitalOceanHourlyUsd ??
+        numberFromEnv("AGENT_RUNNER_DASHBOARD_DO_HOURLY_USD") ??
+        digitalOceanState?.activeDroplet?.hourlyPriceUsd;
     return {
         projectRoot,
         projectSlug,
@@ -111,7 +140,25 @@ export function resolveConfig(projectRootInput = process.cwd()) {
             dropletName: fileConfig.digitalOcean.dropletName ??
                 process.env.AGENT_RUNNER_DO_DROPLET_NAME ??
                 `agent-runner-${projectSlug}`,
-            tags: fileConfig.digitalOcean.tags
+            tags: fileConfig.digitalOcean.tags,
+            hourlyPriceUsd: digitalOceanState?.activeDroplet?.hourlyPriceUsd
+        },
+        dashboard: {
+            enabled: fileConfig.dashboard.enabled ?? Boolean(dashboardEndpoint && dashboardToken),
+            endpoint: dashboardEndpoint,
+            token: dashboardToken,
+            tokenEnv: fileConfig.dashboard.tokenEnv,
+            intervalSeconds: fileConfig.dashboard.intervalSeconds,
+            model: fileConfig.dashboard.model ?? process.env.AGENT_RUNNER_DASHBOARD_MODEL,
+            reasoningEffort: fileConfig.dashboard.reasoningEffort,
+            maxLogLines: fileConfig.dashboard.maxLogLines,
+            costs: {
+                digitalOceanHourlyUsd,
+                codexSubscriptionMonthlyUsd: fileConfig.dashboard.costs.codexSubscriptionMonthlyUsd ??
+                    numberFromEnv("AGENT_RUNNER_CODEX_SUBSCRIPTION_USD"),
+                codexSubscriptionMonthlyTokens: fileConfig.dashboard.costs.codexSubscriptionMonthlyTokens ??
+                    numberFromEnv("AGENT_RUNNER_CODEX_SUBSCRIPTION_TOKENS")
+            }
         },
         configPath: path.join(projectRoot, configFileName)
     };
@@ -139,7 +186,22 @@ export function createDefaultConfig(projectRoot) {
         },
         digitalOcean: {
             tags: []
+        },
+        dashboard: {
+            tokenEnv: "AGENT_RUNNER_DASHBOARD_TOKEN",
+            intervalSeconds: 60,
+            reasoningEffort: "low",
+            maxLogLines: 200,
+            costs: {}
         }
     };
+}
+function numberFromEnv(name) {
+    const value = process.env[name];
+    if (value === undefined || value === "") {
+        return undefined;
+    }
+    const numeric = Number(value);
+    return Number.isFinite(numeric) && numeric > 0 ? numeric : undefined;
 }
 //# sourceMappingURL=config.js.map

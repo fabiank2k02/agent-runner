@@ -60,6 +60,7 @@ export interface ManagedDropletRefreshResult {
     ip?: string;
     region: string;
     size: string;
+    hourlyPriceUsd?: number;
   };
   staleDroplet?: ActiveDropletState;
 }
@@ -77,6 +78,7 @@ export async function createDroplet(
   const region = options.region ?? config.digitalOcean.region;
   const size = options.size ?? config.digitalOcean.size;
   const image = options.image ?? config.digitalOcean.image;
+  const hourlyPriceUsd = await client.getSize(size).then((result) => result?.price_hourly).catch(() => undefined);
 
   if (state?.activeDroplet) {
     const refresh = await refreshManagedDroplet(config);
@@ -108,6 +110,7 @@ export async function createDroplet(
     ip,
     region,
     size,
+    hourlyPriceUsd,
     image,
     user: "root",
     sshKeyPath: sshKey.privateKeyPath,
@@ -214,7 +217,8 @@ export async function refreshManagedDroplet(config: ResolvedConfig): Promise<Man
         locked: droplet.locked,
         ip: publicIpv4(droplet),
         region: droplet.region.slug,
-        size: droplet.size_slug
+        size: droplet.size_slug,
+        hourlyPriceUsd: state.activeDroplet.hourlyPriceUsd
       }
     };
   } catch (error) {

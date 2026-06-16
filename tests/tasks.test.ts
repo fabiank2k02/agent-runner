@@ -36,6 +36,57 @@ describe("tasks", () => {
     expect(state.lastTask.logFile).toBe("~/agent-runner/logs/sample/task-1.jsonl");
   });
 
+  it("starts an isolated dashboard observer when dashboard reporting is enabled", async () => {
+    const projectRoot = await tempDir("task-project-dashboard");
+    const stateRoot = await tempDir("task-state-dashboard");
+    const layout = fakeLayout(stateRoot);
+    const remote = new FakeRemote();
+    const config = fakeConfig(projectRoot);
+    config.dashboard = {
+      enabled: true,
+      endpoint: "https://dashboard.example.com/api/ingest",
+      token: "dashboard-secret",
+      tokenEnv: "AGENT_RUNNER_DASHBOARD_TOKEN",
+      intervalSeconds: 15,
+      model: "gpt-test-mini",
+      reasoningEffort: "low",
+      maxLogLines: 120,
+      costs: {
+        digitalOceanHourlyUsd: 0.03571,
+        codexSubscriptionMonthlyUsd: 200,
+        codexSubscriptionMonthlyTokens: 100000000
+      }
+    };
+    const context: CommandContext = {
+      config,
+      layout,
+      executor: new FakeExecutor(),
+      remote,
+      dryRun: false
+    };
+
+    const result = await runTask(context, "finish the feature", { taskId: "task-2" });
+    const state = JSON.parse(await fs.promises.readFile(layout.localStateFile, "utf8"));
+
+    expect(result.dashboardObserver?.enabled).toBe(true);
+    expect(result.dashboardObserver?.sessionName).toBe("agent-runner-sample-observer-task-2");
+    expect(state.lastTask.dashboardObserverSessionName).toBe("agent-runner-sample-observer-task-2");
+    expect(remote.commands.some((command) => command.includes("agent-runner-sample-observer-task-2"))).toBe(true);
+    expect(remote.commands.some((command) => command.includes("/usr/local/bin"))).toBe(true);
+    const observerScript = remote.writes.get("~/agent-runner/logs/sample/task-2.observer.mjs");
+    expect(observerScript).toContain("https://dashboard.example.com/api/ingest");
+    expect(observerScript).toContain("CODEX_HOME");
+    expect(observerScript).toContain("gpt-test-mini");
+    expect(observerScript).toContain("maxLogLines");
+    expect(observerScript).toContain("digitalOceanHourlyUsd");
+    expect(observerScript).toContain("--skip-git-repo-check");
+    expect(observerScript).toContain("function finalizeSummaryForStatus(summary, status)");
+    expect(observerScript).toContain("function expandHome(value)");
+    expect(observerScript).toContain('config[key] = expandHome(config[key])');
+    expect(observerScript).toContain("fs.mkdirSync(path.dirname(config.summaryFile), { recursive: true })");
+    expect(observerScript).not.toContain("evidence");
+  });
+
   it("rejects task ids that would alter remote paths", async () => {
     const projectRoot = await tempDir("task-project-invalid");
     const stateRoot = await tempDir("task-state-invalid");

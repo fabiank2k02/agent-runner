@@ -1,0 +1,9 @@
+name = "agent-runner-dashboard"
+compatibility_date = "2026-06-16"
+pages_build_output_dir = "./public"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "agent-runner-dashboard"
+database_id = "7063d3f6-a76f-46bb-80b3-8825d1126288"
+migrations_dir = "./migrations"

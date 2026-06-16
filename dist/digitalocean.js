@@ -20,6 +20,14 @@ export class DigitalOceanClient {
         const data = await this.request("GET", "/account/keys?per_page=200");
         return data.ssh_keys;
     }
+    async listSizes() {
+        const data = await this.request("GET", "/sizes?per_page=200");
+        return data.sizes;
+    }
+    async getSize(slug) {
+        const sizes = await this.listSizes();
+        return sizes.find((size) => size.slug === slug);
+    }
     async createSshKey(name, publicKey) {
         const data = await this.request("POST", "/account/keys", {
             name,

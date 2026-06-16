@@ -10,7 +10,10 @@ const taskStateSchema = z.object({
   statusFile: z.string(),
   logFile: z.string(),
   promptFile: z.string(),
-  startedAt: z.string()
+  startedAt: z.string(),
+  dashboardObserverSessionName: z.string().optional(),
+  dashboardSummaryFile: z.string().optional(),
+  dashboardObserverLogFile: z.string().optional()
 });
 
 const localStateSchema = z

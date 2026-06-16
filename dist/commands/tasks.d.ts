@@ -1,8 +1,10 @@
 import type { CommandContext } from "../context.js";
 import { type TaskState } from "../state.js";
+import { type DashboardObserverResult } from "./dashboard.js";
 export interface RunTaskResult extends TaskState {
     statusFile: string;
     logFile: string;
+    dashboardObserver?: DashboardObserverResult;
 }
 export declare function createTaskId(date?: Date): string;
 export declare function sessionName(projectSlug: string, taskId: string): string;

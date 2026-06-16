@@ -61,6 +61,45 @@ describe("resolveConfig", () => {
     expect(config.codex.yolo).toBe(true);
   });
 
+  it("auto-enables dashboard reporting when endpoint and token env are present", async () => {
+    const root = await tempDir("config-dashboard");
+    process.env.AGENT_RUNNER_DASHBOARD_ENDPOINT = "https://agent-runner.example.com/api/ingest";
+    process.env.AGENT_RUNNER_DASHBOARD_TOKEN = "dashboard-secret";
+    process.env.AGENT_RUNNER_DASHBOARD_MODEL = "gpt-test-mini";
+    process.env.AGENT_RUNNER_DASHBOARD_DO_HOURLY_USD = "0.03571";
+    process.env.AGENT_RUNNER_CODEX_SUBSCRIPTION_USD = "200";
+    process.env.AGENT_RUNNER_CODEX_SUBSCRIPTION_TOKENS = "100000000";
+
+    const config = resolveConfig(root);
+
+    expect(config.dashboard.enabled).toBe(true);
+    expect(config.dashboard.endpoint).toBe("https://agent-runner.example.com/api/ingest");
+    expect(config.dashboard.token).toBe("dashboard-secret");
+    expect(config.dashboard.model).toBe("gpt-test-mini");
+    expect(config.dashboard.reasoningEffort).toBe("low");
+    expect(config.dashboard.costs.digitalOceanHourlyUsd).toBe(0.03571);
+    expect(config.dashboard.costs.codexSubscriptionMonthlyUsd).toBe(200);
+    expect(config.dashboard.costs.codexSubscriptionMonthlyTokens).toBe(100000000);
+  });
+
+  it("lets project config disable dashboard reporting even when env is present", async () => {
+    const root = await tempDir("config-dashboard-disabled");
+    process.env.AGENT_RUNNER_DASHBOARD_ENDPOINT = "https://agent-runner.example.com/api/ingest";
+    process.env.AGENT_RUNNER_DASHBOARD_TOKEN = "dashboard-secret";
+    await fs.promises.writeFile(
+      path.join(root, ".agent-runner.json"),
+      JSON.stringify({
+        dashboard: {
+          enabled: false
+        }
+      })
+    );
+
+    const config = resolveConfig(root);
+
+    expect(config.dashboard.enabled).toBe(false);
+  });
+
   it("loads .env.local over .env", async () => {
     const root = await tempDir("env");
     await fs.promises.writeFile(path.join(root, ".env"), "AGENT_RUNNER_REMOTE_HOST=base\n");

@@ -36,6 +36,7 @@ export interface ManagedDropletRefreshResult {
         ip?: string;
         region: string;
         size: string;
+        hourlyPriceUsd?: number;
     };
     staleDroplet?: ActiveDropletState;
 }

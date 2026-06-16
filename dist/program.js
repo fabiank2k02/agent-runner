@@ -80,7 +80,7 @@ export function buildProgram() {
         const globals = getGlobals(program);
         const resolvedPrompt = await resolvePrompt(globals, prompt, options.promptFile);
         const result = await runTask(createContext(globals), resolvedPrompt, { taskId: options.taskId });
-        write(globals, result, `started ${result.sessionName}\nlog: ${result.logFile}`);
+        write(globals, result, formatTaskStarted(result));
     });
     program
         .command("start")
@@ -233,7 +233,7 @@ async function startTask(globals, prompt, options) {
         write(globals, { ok: true }, "remote devcontainer is ready");
     }
     const result = await runTask(context, prompt, { taskId: options.taskId });
-    write(globals, result, `started ${result.sessionName}\nlog: ${result.logFile}`);
+    write(globals, result, formatTaskStarted(result));
 }
 async function finishTask(globals, options) {
     const context = createContext(globals);
@@ -284,5 +284,18 @@ function formatDropletDestroyed(result) {
     return result.alreadyMissing
         ? `droplet ${result.dropletId} was already missing; local state cleared`
         : `droplet ${result.dropletId} destroyed`;
+}
+function formatTaskStarted(result) {
+    const lines = [`started ${result.sessionName}`, `log: ${result.logFile}`];
+    if (result.dashboardObserver?.sessionName) {
+        lines.push(`dashboard observer: ${result.dashboardObserver.sessionName}`);
+        if (result.dashboardObserver.summaryFile) {
+            lines.push(`dashboard summary: ${result.dashboardObserver.summaryFile}`);
+        }
+    }
+    else if (result.dashboardObserver?.error) {
+        lines.push(`dashboard observer failed: ${result.dashboardObserver.error}`);
+    }
+    return lines.join("\n");
 }
 //# sourceMappingURL=program.js.map

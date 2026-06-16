@@ -8,6 +8,7 @@ const activeDropletSchema = z.object({
     ip: z.string(),
     region: z.string(),
     size: z.string(),
+    hourlyPriceUsd: z.number().optional(),
     image: z.union([z.string(), z.number()]),
     user: z.string().default("root"),
     sshKeyPath: z.string(),

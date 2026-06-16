@@ -63,6 +63,15 @@ export async function doctor(context) {
             ? "DIGITALOCEAN_TOKEN or AGENT_RUNNER_DO_TOKEN is set"
             : "not set; required only for droplet create/destroy"
     });
+    checks.push({
+        name: "dashboard",
+        ok: !config.dashboard.enabled || Boolean(config.dashboard.endpoint && config.dashboard.token),
+        detail: config.dashboard.enabled
+            ? config.dashboard.endpoint && config.dashboard.token
+                ? `enabled; posting to ${config.dashboard.endpoint}`
+                : `enabled; set AGENT_RUNNER_DASHBOARD_ENDPOINT and ${config.dashboard.tokenEnv}`
+            : "not set; optional"
+    });
     return {
         ok: checks.every((check) => check.ok),
         checks

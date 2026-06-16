@@ -31,6 +31,20 @@ declare const configFileSchema: z.ZodObject<{
         dropletName: z.ZodOptional<z.ZodString>;
         tags: z.ZodDefault<z.ZodArray<z.ZodString>>;
     }, z.core.$strip>>;
+    dashboard: z.ZodDefault<z.ZodObject<{
+        enabled: z.ZodOptional<z.ZodBoolean>;
+        endpoint: z.ZodOptional<z.ZodString>;
+        tokenEnv: z.ZodDefault<z.ZodString>;
+        intervalSeconds: z.ZodDefault<z.ZodCoercedNumber<unknown>>;
+        model: z.ZodOptional<z.ZodString>;
+        reasoningEffort: z.ZodDefault<z.ZodString>;
+        maxLogLines: z.ZodDefault<z.ZodCoercedNumber<unknown>>;
+        costs: z.ZodDefault<z.ZodObject<{
+            digitalOceanHourlyUsd: z.ZodOptional<z.ZodCoercedNumber<unknown>>;
+            codexSubscriptionMonthlyUsd: z.ZodOptional<z.ZodCoercedNumber<unknown>>;
+            codexSubscriptionMonthlyTokens: z.ZodOptional<z.ZodCoercedNumber<unknown>>;
+        }, z.core.$strip>>;
+    }, z.core.$strip>>;
 }, z.core.$strip>;
 export type AgentRunnerConfigFile = z.infer<typeof configFileSchema>;
 export interface ResolvedConfig {
@@ -66,6 +80,22 @@ export interface ResolvedConfig {
         image: string;
         dropletName: string;
         tags: string[];
+        hourlyPriceUsd?: number;
+    };
+    dashboard: {
+        enabled: boolean;
+        endpoint?: string;
+        token?: string;
+        tokenEnv: string;
+        intervalSeconds: number;
+        model?: string;
+        reasoningEffort: string;
+        maxLogLines: number;
+        costs: {
+            digitalOceanHourlyUsd?: number;
+            codexSubscriptionMonthlyUsd?: number;
+            codexSubscriptionMonthlyTokens?: number;
+        };
     };
     configPath: string;
 }

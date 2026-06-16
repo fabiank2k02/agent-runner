@@ -24,6 +24,12 @@ export interface DigitalOceanDroplet {
   };
 }
 
+export interface DigitalOceanSize {
+  slug: string;
+  price_monthly: number;
+  price_hourly: number;
+}
+
 export class DigitalOceanApiError extends Error {
   constructor(
     message: string,
@@ -42,6 +48,16 @@ export class DigitalOceanClient {
   async listSshKeys(): Promise<DigitalOceanSshKey[]> {
     const data = await this.request<{ ssh_keys: DigitalOceanSshKey[] }>("GET", "/account/keys?per_page=200");
     return data.ssh_keys;
+  }
+
+  async listSizes(): Promise<DigitalOceanSize[]> {
+    const data = await this.request<{ sizes: DigitalOceanSize[] }>("GET", "/sizes?per_page=200");
+    return data.sizes;
+  }
+
+  async getSize(slug: string): Promise<DigitalOceanSize | undefined> {
+    const sizes = await this.listSizes();
+    return sizes.find((size) => size.slug === slug);
   }
 
   async createSshKey(name: string, publicKey: string): Promise<DigitalOceanSshKey> {

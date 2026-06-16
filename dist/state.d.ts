@@ -8,6 +8,9 @@ declare const taskStateSchema: z.ZodObject<{
     logFile: z.ZodString;
     promptFile: z.ZodString;
     startedAt: z.ZodString;
+    dashboardObserverSessionName: z.ZodOptional<z.ZodString>;
+    dashboardSummaryFile: z.ZodOptional<z.ZodString>;
+    dashboardObserverLogFile: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 declare const localStateSchema: z.ZodDefault<z.ZodObject<{
     version: z.ZodLiteral<1>;
@@ -28,6 +31,9 @@ declare const localStateSchema: z.ZodDefault<z.ZodObject<{
         logFile: z.ZodString;
         promptFile: z.ZodString;
         startedAt: z.ZodString;
+        dashboardObserverSessionName: z.ZodOptional<z.ZodString>;
+        dashboardSummaryFile: z.ZodOptional<z.ZodString>;
+        dashboardObserverLogFile: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
     updatedAt: z.ZodString;
 }, z.core.$strip>>;

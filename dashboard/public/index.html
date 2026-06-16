@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Agent Runner Dashboard</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Agent Runner</p>
+        <h1>Active Jobs</h1>
+      </div>
+      <div class="auth-form">
+        <span class="access-badge">Cloudflare Access</span>
+        <button id="refresh-button" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="summary-strip" aria-label="Job summary">
+        <div>
+          <span class="metric" id="metric-running">0</span>
+          <span class="label">Running</span>
+        </div>
+        <div>
+          <span class="metric" id="metric-stuck">0</span>
+          <span class="label">Stuck</span>
+        </div>
+        <div>
+          <span class="metric" id="metric-completed">0</span>
+          <span class="label">Completed</span>
+        </div>
+        <div>
+          <span class="metric" id="metric-failed">0</span>
+          <span class="label">Failed</span>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <div class="job-list">
+          <div class="section-head">
+            <h2>Jobs</h2>
+            <span id="last-updated">Never updated</span>
+          </div>
+          <div id="jobs" class="jobs" aria-live="polite"></div>
+        </div>
+
+        <article class="detail" id="detail">
+          <div class="empty-state">Select a job</div>
+        </article>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

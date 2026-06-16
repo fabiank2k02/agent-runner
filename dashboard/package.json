@@ -1,0 +1,16 @@
+{
+  "name": "agent-runner-dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "wrangler": "sh ./scripts/wrangler.sh",
+    "dev": "sh ./scripts/wrangler.sh pages dev public",
+    "deploy": "sh ./scripts/wrangler.sh pages deploy public --project-name agent-runner-dashboard",
+    "db:create": "sh ./scripts/wrangler.sh d1 create agent-runner-dashboard",
+    "db:migrate:local": "sh ./scripts/wrangler.sh d1 migrations apply agent-runner-dashboard --local",
+    "db:migrate": "sh ./scripts/wrangler.sh d1 migrations apply agent-runner-dashboard --remote"
+  },
+  "devDependencies": {
+    "wrangler": "^4.100.0"
+  }
+}

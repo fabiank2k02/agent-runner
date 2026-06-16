@@ -5,6 +5,7 @@ declare const activeDropletSchema: z.ZodObject<{
     ip: z.ZodString;
     region: z.ZodString;
     size: z.ZodString;
+    hourlyPriceUsd: z.ZodOptional<z.ZodNumber>;
     image: z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>;
     user: z.ZodDefault<z.ZodString>;
     sshKeyPath: z.ZodString;
@@ -20,6 +21,7 @@ declare const digitalOceanStateSchema: z.ZodDefault<z.ZodObject<{
         ip: z.ZodString;
         region: z.ZodString;
         size: z.ZodString;
+        hourlyPriceUsd: z.ZodOptional<z.ZodNumber>;
         image: z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>;
         user: z.ZodDefault<z.ZodString>;
         sshKeyPath: z.ZodString;

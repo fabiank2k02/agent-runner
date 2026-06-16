@@ -7,10 +7,12 @@ import {
   writeLocalState,
   type TaskState
 } from "../state.js";
+import { startDashboardObserver, type DashboardObserverResult } from "./dashboard.js";
 
 export interface RunTaskResult extends TaskState {
   statusFile: string;
   logFile: string;
+  dashboardObserver?: DashboardObserverResult;
 }
 
 export function createTaskId(date = new Date()): string {
@@ -92,7 +94,7 @@ exit "$code"
   await remote.writeText(scriptFile, script, "700");
   await remote.run(`tmux new-session -d -s ${shellQuote(session)} ${quoteRemotePath(scriptFile)}`);
 
-  const task: TaskState = {
+  let task: TaskState = {
     taskId,
     sessionName: session,
     statusFile,
@@ -102,7 +104,21 @@ exit "$code"
   };
   const existing = await readLocalState(layout);
   await writeLocalState(layout, stateWithTask(layout, task, existing));
-  return { ...task, statusFile, logFile };
+
+  const dashboardObserver = await startDashboardObserver(context, task).catch((error: unknown): DashboardObserverResult => ({
+    enabled: config.dashboard.enabled,
+    error: error instanceof Error ? error.message : String(error)
+  }));
+  if (dashboardObserver.enabled) {
+    task = {
+      ...task,
+      dashboardObserverSessionName: dashboardObserver.sessionName,
+      dashboardSummaryFile: dashboardObserver.summaryFile,
+      dashboardObserverLogFile: dashboardObserver.logFile
+    };
+    await writeLocalState(layout, stateWithTask(layout, task, existing));
+  }
+  return { ...task, statusFile, logFile, dashboardObserver };
 }
 
 export async function taskStatus(context: CommandContext, taskId?: string): Promise<string> {

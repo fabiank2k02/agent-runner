@@ -28,6 +28,11 @@ export interface DigitalOceanDroplet {
         }>;
     };
 }
+export interface DigitalOceanSize {
+    slug: string;
+    price_monthly: number;
+    price_hourly: number;
+}
 export declare class DigitalOceanApiError extends Error {
     readonly status: number;
     readonly method: string;
@@ -38,6 +43,8 @@ export declare class DigitalOceanClient {
     private readonly options;
     constructor(options: DigitalOceanClientOptions);
     listSshKeys(): Promise<DigitalOceanSshKey[]>;
+    listSizes(): Promise<DigitalOceanSize[]>;
+    getSize(slug: string): Promise<DigitalOceanSize | undefined>;
     createSshKey(name: string, publicKey: string): Promise<DigitalOceanSshKey>;
     createDroplet(input: {
         name: string;

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { quoteRemotePath, shellQuote } from "../quote.js";
 import { readLocalState, stateWithTask, writeLocalState } from "../state.js";
+import { startDashboardObserver } from "./dashboard.js";
 export function createTaskId(date = new Date()) {
     const timestamp = date.toISOString().replace(/[-:]/gu, "").replace(/\..+$/u, "Z");
     return `${timestamp}-${randomBytes(3).toString("hex")}`;
@@ -73,7 +74,7 @@ exit "$code"
 `.trimStart();
     await remote.writeText(scriptFile, script, "700");
     await remote.run(`tmux new-session -d -s ${shellQuote(session)} ${quoteRemotePath(scriptFile)}`);
-    const task = {
+    let task = {
         taskId,
         sessionName: session,
         statusFile,
@@ -83,7 +84,20 @@ exit "$code"
     };
     const existing = await readLocalState(layout);
     await writeLocalState(layout, stateWithTask(layout, task, existing));
-    return { ...task, statusFile, logFile };
+    const dashboardObserver = await startDashboardObserver(context, task).catch((error) => ({
+        enabled: config.dashboard.enabled,
+        error: error instanceof Error ? error.message : String(error)
+    }));
+    if (dashboardObserver.enabled) {
+        task = {
+            ...task,
+            dashboardObserverSessionName: dashboardObserver.sessionName,
+            dashboardSummaryFile: dashboardObserver.summaryFile,
+            dashboardObserverLogFile: dashboardObserver.logFile
+        };
+        await writeLocalState(layout, stateWithTask(layout, task, existing));
+    }
+    return { ...task, statusFile, logFile, dashboardObserver };
 }
 export async function taskStatus(context, taskId) {
     const task = await resolveTask(context, taskId);

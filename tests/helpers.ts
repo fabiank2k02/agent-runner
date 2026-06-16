@@ -41,7 +41,16 @@ export function fakeConfig(projectRoot: string): ResolvedConfig {
       size: "s-2vcpu-4gb",
       image: "ubuntu-24-04-x64",
       dropletName: "agent-runner-sample",
-      tags: []
+      tags: [],
+      hourlyPriceUsd: undefined
+    },
+    dashboard: {
+      enabled: false,
+      tokenEnv: "AGENT_RUNNER_DASHBOARD_TOKEN",
+      intervalSeconds: 60,
+      reasoningEffort: "low",
+      maxLogLines: 200,
+      costs: {}
     },
     configPath: path.join(projectRoot, ".agent-runner.json")
   };

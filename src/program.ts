@@ -105,7 +105,7 @@ export function buildProgram(): Command {
       const globals = getGlobals(program);
       const resolvedPrompt = await resolvePrompt(globals, prompt, options.promptFile);
       const result = await runTask(createContext(globals), resolvedPrompt, { taskId: options.taskId });
-      write(globals, result, `started ${result.sessionName}\nlog: ${result.logFile}`);
+      write(globals, result, formatTaskStarted(result));
     });
 
   program
@@ -290,7 +290,7 @@ async function startTask(
   }
 
   const result = await runTask(context, prompt, { taskId: options.taskId });
-  write(globals, result, `started ${result.sessionName}\nlog: ${result.logFile}`);
+  write(globals, result, formatTaskStarted(result));
 }
 
 async function finishTask(globals: GlobalOptions, options: { keepDroplet?: boolean }): Promise<void> {
@@ -348,4 +348,17 @@ function formatDropletDestroyed(result: Awaited<ReturnType<typeof destroyDroplet
   return result.alreadyMissing
     ? `droplet ${result.dropletId} was already missing; local state cleared`
     : `droplet ${result.dropletId} destroyed`;
+}
+
+function formatTaskStarted(result: Awaited<ReturnType<typeof runTask>>): string {
+  const lines = [`started ${result.sessionName}`, `log: ${result.logFile}`];
+  if (result.dashboardObserver?.sessionName) {
+    lines.push(`dashboard observer: ${result.dashboardObserver.sessionName}`);
+    if (result.dashboardObserver.summaryFile) {
+      lines.push(`dashboard summary: ${result.dashboardObserver.summaryFile}`);
+    }
+  } else if (result.dashboardObserver?.error) {
+    lines.push(`dashboard observer failed: ${result.dashboardObserver.error}`);
+  }
+  return lines.join("\n");
 }
