@@ -77,6 +77,7 @@ describe("resolveConfig", () => {
     expect(config.dashboard.token).toBe("dashboard-secret");
     expect(config.dashboard.model).toBe("gpt-test-mini");
     expect(config.dashboard.reasoningEffort).toBe("low");
+    expect(config.dashboard.intervalSeconds).toBe(300);
     expect(config.dashboard.costs.digitalOceanHourlyUsd).toBe(0.03571);
     expect(config.dashboard.costs.codexSubscriptionMonthlyUsd).toBe(200);
     expect(config.dashboard.costs.codexSubscriptionMonthlyTokens).toBe(100000000);

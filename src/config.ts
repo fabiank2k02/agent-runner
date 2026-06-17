@@ -54,7 +54,7 @@ const configFileSchema = z
         enabled: z.boolean().optional(),
         endpoint: z.string().url().optional(),
         tokenEnv: z.string().min(1).default("AGENT_RUNNER_DASHBOARD_TOKEN"),
-        intervalSeconds: z.coerce.number().int().min(15).default(60),
+        intervalSeconds: z.coerce.number().int().min(15).default(300),
         model: z.string().min(1).optional(),
         reasoningEffort: z.string().min(1).default("low"),
         maxLogLines: z.coerce.number().int().min(20).max(1000).default(200),
@@ -68,7 +68,7 @@ const configFileSchema = z
       })
       .default({
         tokenEnv: "AGENT_RUNNER_DASHBOARD_TOKEN",
-        intervalSeconds: 60,
+        intervalSeconds: 300,
         reasoningEffort: "low",
         maxLogLines: 200,
         costs: {}
@@ -266,7 +266,7 @@ export function createDefaultConfig(projectRoot: string): AgentRunnerConfigFile 
     },
     dashboard: {
       tokenEnv: "AGENT_RUNNER_DASHBOARD_TOKEN",
-      intervalSeconds: 60,
+      intervalSeconds: 300,
       reasoningEffort: "low",
       maxLogLines: 200,
       costs: {}

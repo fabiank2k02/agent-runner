@@ -62,4 +62,4 @@ AGENT_RUNNER_CODEX_SUBSCRIPTION_USD=
 AGENT_RUNNER_CODEX_SUBSCRIPTION_TOKENS=
 ```
 
-When endpoint and token are present, `agent-runner run` and `agent-runner start` launch a second observer tmux session automatically. The observer reads only the prompt, status file, and bounded JSONL log tail, then posts structured progress updates to Pages. Set the dashboard model to a cheaper mini model so progress and ETA summaries do not use the main task model. Cost estimates use managed DigitalOcean hourly pricing when available, plus prorated subscription token cost when the subscription env values are set.
+When endpoint and token are present, `agent-runner run` and `agent-runner start` launch a second observer tmux session automatically. The observer reads only the prompt, status file, and bounded JSONL log tail, then posts structured progress updates to Pages every 5 minutes by default. Set the dashboard model to a cheaper mini model so progress and ETA summaries do not use the main task model. Cost estimates use managed DigitalOcean hourly pricing when available, plus prorated subscription token cost when the subscription env values are set.
