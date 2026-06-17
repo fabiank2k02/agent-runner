@@ -44,6 +44,9 @@ function authenticateRead(request, env) {
   if (request.headers.get("cf-access-jwt-assertion") || request.headers.get("cf-access-authenticated-user-email")) {
     return null;
   }
+  if (hasCloudflareAccessSession(request)) {
+    return null;
+  }
 
   const expected = env.AGENT_RUNNER_DASHBOARD_TOKEN || env.AGENT_RUNNER_DASHBOARD_PREVIEW_TOKEN;
   if (!expected) {
@@ -57,6 +60,11 @@ function authenticateRead(request, env) {
     return { status: 401, body: { error: "Unauthorized" } };
   }
   return null;
+}
+
+function hasCloudflareAccessSession(request) {
+  const cookie = request.headers.get("cookie") || "";
+  return /(?:^|;\s*)CF_Authorization=/.test(cookie) || /(?:^|;\s*)CF_AppSession=/.test(cookie);
 }
 
 function mapJobRow(row) {
