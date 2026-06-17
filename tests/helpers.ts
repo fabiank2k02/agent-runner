@@ -35,6 +35,9 @@ export function fakeConfig(projectRoot: string): ResolvedConfig {
     rsync: {
       excludes: []
     },
+    telemetry: {
+      denyGlobs: []
+    },
     digitalOcean: {
       token: "do-token",
       region: "sgp1",

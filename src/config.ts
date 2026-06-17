@@ -40,6 +40,11 @@ const configFileSchema = z
         excludes: z.array(z.string()).default([])
       })
       .default({ excludes: [] }),
+    telemetry: z
+      .object({
+        denyGlobs: z.array(z.string()).default([])
+      })
+      .default({ denyGlobs: [] }),
     digitalOcean: z
       .object({
         region: z.string().min(1).optional(),
@@ -105,6 +110,9 @@ export interface ResolvedConfig {
   };
   rsync: {
     excludes: string[];
+  };
+  telemetry: {
+    denyGlobs: string[];
   };
   digitalOcean: {
     token?: string;
@@ -211,6 +219,12 @@ export function resolveConfig(projectRootInput = process.cwd()): ResolvedConfig 
     devcontainer: fileConfig.devcontainer,
     codex: fileConfig.codex,
     rsync: fileConfig.rsync,
+    telemetry: {
+      denyGlobs: [
+        ...fileConfig.telemetry.denyGlobs,
+        ...stringListFromEnv("AGENT_RUNNER_TELEMETRY_DENY_GLOBS")
+      ]
+    },
     digitalOcean: {
       token: process.env.AGENT_RUNNER_DO_TOKEN ?? process.env.DIGITALOCEAN_TOKEN,
       region: fileConfig.digitalOcean.region ?? process.env.AGENT_RUNNER_DO_REGION ?? "sgp1",
@@ -276,6 +290,9 @@ export function createDefaultConfig(projectRoot: string): AgentRunnerConfigFile 
     rsync: {
       excludes: []
     },
+    telemetry: {
+      denyGlobs: []
+    },
     digitalOcean: {
       tags: []
     },
@@ -296,4 +313,12 @@ function numberFromEnv(name: string): number | undefined {
   }
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? numeric : undefined;
+}
+
+function stringListFromEnv(name: string): string[] {
+  const value = process.env[name];
+  if (!value) {
+    return [];
+  }
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
 }

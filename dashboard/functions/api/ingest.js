@@ -1,8 +1,38 @@
 const MAX_LOG_TAIL_CHARS = 100000;
+const MAX_INLINE_JSON_CHARS = 8192;
 const terminalStatuses = new Set(["completed", "failed", "stopped"]);
+const localSourceKinds = new Set(["codespace-worker", "codex-cli-thread", "codex-ide-thread", "local-workspace"]);
+const sourceKinds = new Set(["runner-job", ...localSourceKinds]);
+const streamKinds = new Set(["runner-job", "codex-thread", "workspace"]);
 
 export async function onRequestOptions() {
   return cors(new Response(null, { status: 204 }));
+}
+
+export async function onRequestGet({ request, env }) {
+  const auth = authenticate(request, env);
+  if (auth) {
+    return cors(json(auth.body, auth.status));
+  }
+  if (!env.DB) {
+    return cors(json({ error: "D1 binding DB is not configured" }, 500));
+  }
+
+  const url = new URL(request.url);
+  const jobId = url.searchParams.get("verifyJobId") || "";
+  if (!jobId) {
+    return cors(json({ error: "verifyJobId is required" }, 400));
+  }
+
+  const job = await env.DB.prepare(
+    `SELECT id, status, updated_at
+     FROM jobs
+     WHERE id = ?`
+  )
+    .bind(jobId)
+    .first();
+
+  return cors(json({ exists: Boolean(job), job: job ? { id: job.id, status: job.status, updatedAt: job.updated_at } : null }));
 }
 
 export async function onRequestPost({ request, env }) {
@@ -21,12 +51,16 @@ export async function onRequestPost({ request, env }) {
     return cors(json({ error: "Expected JSON body" }, 400));
   }
 
+  const now = new Date().toISOString();
+  if (payload?.kind === "raw-telemetry") {
+    return cors(await handleRawTelemetry(payload, env, now));
+  }
+
   const validation = validatePayload(payload);
   if (validation.error) {
     return cors(json({ error: validation.error }, 400));
   }
 
-  const now = new Date().toISOString();
   const summary = normalizeSummary(payload.summary);
   const status = normalizeStatus(payload.status);
   const telemetry = normalizeTelemetry(payload.telemetry, summary);
@@ -120,6 +154,273 @@ export async function onRequestPost({ request, env }) {
   return cors(json({ ok: true, id: jobId, receivedAt: now }));
 }
 
+async function handleRawTelemetry(payload, env, now) {
+  const validation = validateRawEnvelope(payload);
+  if (validation.error) {
+    return json({ error: validation.error }, 400);
+  }
+
+  const envelope = normalizeRawEnvelope(payload, now);
+  const serialized = JSON.stringify(envelope);
+  const sha256 = await sha256Hex(serialized);
+  const streamDbId = streamDatabaseId(envelope);
+  const sourceDbId = sourceDatabaseId(envelope);
+  const existing = await env.DB.prepare(
+    `SELECT id, sha256, r2_key
+     FROM telemetry_chunks
+     WHERE stream_id = ? AND sequence = ?`
+  )
+    .bind(streamDbId, envelope.sequence)
+    .first();
+
+  if (existing) {
+    if (existing.sha256 === sha256) {
+      return json({
+        ok: true,
+        id: existing.id,
+        duplicate: true,
+        receivedAt: now,
+        sha256
+      });
+    }
+
+    const conflictId = `conflict:${streamDbId}:${envelope.sequence}:${sha256.slice(0, 16)}`;
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO telemetry_conflicts (
+        id, stream_id, sequence, existing_chunk_id, existing_sha256, received_sha256,
+        source_kind, project_slug, task_id, created_at, metadata_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        conflictId,
+        streamDbId,
+        envelope.sequence,
+        existing.id,
+        existing.sha256,
+        sha256,
+        envelope.sourceKind,
+        envelope.projectSlug,
+        envelope.streamId,
+        now,
+        JSON.stringify(envelope.metadata)
+      )
+      .run();
+    return json(
+      {
+        ok: false,
+        error: "Raw telemetry sequence conflict",
+        conflict: true,
+        streamId: streamDbId,
+        sequence: envelope.sequence,
+        existingSha256: existing.sha256,
+        receivedSha256: sha256
+      },
+      409
+    );
+  }
+
+  const r2Key = rawTelemetryKey(envelope, sha256);
+  const uncompressedBytes = byteLength(serialized);
+  let storedBytes = 0;
+  let storedInR2 = false;
+  if (env.RAW_TELEMETRY) {
+    const compressed = await gzipText(serialized);
+    storedBytes = compressed.byteLength;
+    await env.RAW_TELEMETRY.put(r2Key, compressed, {
+      httpMetadata: {
+        contentType: "application/json",
+        contentEncoding: "gzip"
+      },
+      customMetadata: {
+        sha256,
+        sourceKind: envelope.sourceKind,
+        streamKind: envelope.streamKind,
+        projectSlug: envelope.projectSlug,
+        streamId: envelope.streamId,
+        sequence: String(envelope.sequence)
+      }
+    });
+    storedInR2 = true;
+  } else {
+    storedBytes = uncompressedBytes;
+  }
+
+  const chunkId = `chunk:${streamDbId}:${envelope.sequence}:${sha256.slice(0, 16)}`;
+  const statusHint = statusHintFromEnvelope(envelope);
+  const title = titleFromEnvelope(envelope);
+  const latestActivity = activityFromEnvelope(envelope);
+  const tokenUsage = tokenUsageFromEnvelope(envelope);
+  const linkedRunnerJobId = linkedRunnerJobIdFromEnvelope(envelope);
+  const createdAt = createdAtFromEnvelope(envelope);
+  const inlineJson = storedInR2 ? null : truncate(serialized, MAX_INLINE_JSON_CHARS);
+
+  await env.DB.prepare(
+    `INSERT INTO telemetry_sources (
+      id, source_kind, source_id, project_slug, version, first_seen_at, last_seen_at, metadata_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      source_kind = excluded.source_kind,
+      project_slug = excluded.project_slug,
+      version = excluded.version,
+      last_seen_at = excluded.last_seen_at,
+      metadata_json = excluded.metadata_json`
+  )
+    .bind(
+      sourceDbId,
+      envelope.sourceKind,
+      envelope.sourceId,
+      envelope.projectSlug,
+      nullableInteger(envelope.metadata.telemetrySchemaVersion) ?? envelope.version,
+      now,
+      now,
+      JSON.stringify(envelope.metadata)
+    )
+    .run();
+
+  await env.DB.prepare(
+    `INSERT INTO telemetry_streams (
+      id, source_id, source_kind, stream_kind, stream_id, project_slug, task_id,
+      title, status, latest_activity, created_at, updated_at, latest_telemetry_at,
+      latest_raw_telemetry_at, terminal_at, token_usage_json, metadata_json, linked_job_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      source_id = excluded.source_id,
+      source_kind = excluded.source_kind,
+      stream_kind = excluded.stream_kind,
+      title = COALESCE(excluded.title, telemetry_streams.title),
+      status = excluded.status,
+      latest_activity = COALESCE(excluded.latest_activity, telemetry_streams.latest_activity),
+      updated_at = excluded.updated_at,
+      latest_telemetry_at = excluded.latest_telemetry_at,
+      latest_raw_telemetry_at = excluded.latest_raw_telemetry_at,
+      terminal_at = COALESCE(excluded.terminal_at, telemetry_streams.terminal_at),
+      token_usage_json = excluded.token_usage_json,
+      metadata_json = excluded.metadata_json,
+      linked_job_id = COALESCE(excluded.linked_job_id, telemetry_streams.linked_job_id)`
+  )
+    .bind(
+      streamDbId,
+      sourceDbId,
+      envelope.sourceKind,
+      envelope.streamKind,
+      envelope.streamId,
+      envelope.projectSlug,
+      envelope.streamKind === "runner-job" ? envelope.streamId : null,
+      title,
+      statusHint,
+      latestActivity,
+      createdAt,
+      envelope.generatedAt,
+      envelope.generatedAt,
+      envelope.generatedAt,
+      terminalStatuses.has(statusHint) ? envelope.generatedAt : null,
+      JSON.stringify(tokenUsage),
+      JSON.stringify(envelope.metadata),
+      linkedRunnerJobId
+    )
+    .run();
+
+  await env.DB.prepare(
+    `INSERT INTO telemetry_chunks (
+      id, source_id, stream_id, source_kind, stream_kind, project_slug, task_id,
+      sequence, r2_key, byte_size, uncompressed_byte_size, sha256, created_at,
+      generated_at, cursor_json, metadata_json, terminal_status, payload_inline_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  )
+    .bind(
+      chunkId,
+      sourceDbId,
+      streamDbId,
+      envelope.sourceKind,
+      envelope.streamKind,
+      envelope.projectSlug,
+      envelope.streamKind === "runner-job" ? envelope.streamId : null,
+      envelope.sequence,
+      storedInR2 ? r2Key : null,
+      storedBytes,
+      uncompressedBytes,
+      sha256,
+      now,
+      envelope.generatedAt,
+      JSON.stringify(envelope.cursor),
+      JSON.stringify(envelope.metadata),
+      terminalStatuses.has(statusHint) ? statusHint : null,
+      inlineJson
+    )
+    .run();
+
+  if (envelope.streamKind === "runner-job") {
+    await env.DB.prepare(
+      `UPDATE jobs
+       SET last_raw_telemetry_at = ?,
+           raw_chunk_count = COALESCE(raw_chunk_count, 0) + 1,
+           raw_payload_available = 1,
+           raw_status = ?
+       WHERE id = ?`
+    )
+      .bind(envelope.generatedAt, statusHint, `${envelope.projectSlug}:${envelope.streamId}`)
+      .run();
+  }
+
+  if (localSourceKinds.has(envelope.sourceKind)) {
+    await env.DB.prepare(
+      `INSERT INTO local_threads (
+        id, source_kind, source_id, stream_kind, project_slug, thread_id, title,
+        status, latest_activity, created_at, updated_at, last_telemetry_at,
+        latest_raw_telemetry_at, token_usage_json, linked_runner_job_id,
+        raw_chunk_count, raw_chunk_ids_json, metadata_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        source_kind = excluded.source_kind,
+        source_id = excluded.source_id,
+        stream_kind = excluded.stream_kind,
+        project_slug = excluded.project_slug,
+        title = COALESCE(excluded.title, local_threads.title),
+        status = excluded.status,
+        latest_activity = COALESCE(excluded.latest_activity, local_threads.latest_activity),
+        updated_at = excluded.updated_at,
+        last_telemetry_at = excluded.last_telemetry_at,
+        latest_raw_telemetry_at = excluded.latest_raw_telemetry_at,
+        token_usage_json = excluded.token_usage_json,
+        linked_runner_job_id = COALESCE(excluded.linked_runner_job_id, local_threads.linked_runner_job_id),
+        raw_chunk_count = local_threads.raw_chunk_count + 1,
+        raw_chunk_ids_json = excluded.raw_chunk_ids_json,
+        metadata_json = excluded.metadata_json`
+    )
+      .bind(
+        streamDbId,
+        envelope.sourceKind,
+        sourceDbId,
+        envelope.streamKind,
+        envelope.projectSlug,
+        envelope.streamId,
+        title,
+        statusHint,
+        latestActivity,
+        createdAt,
+        envelope.generatedAt,
+        envelope.generatedAt,
+        envelope.generatedAt,
+        JSON.stringify(tokenUsage),
+        linkedRunnerJobId,
+        1,
+        JSON.stringify([chunkId]),
+        JSON.stringify(envelope.metadata)
+      )
+      .run();
+  }
+
+  return json({
+    ok: true,
+    id: chunkId,
+    streamId: streamDbId,
+    sourceId: sourceDbId,
+    r2Key: storedInR2 ? r2Key : null,
+    sha256,
+    receivedAt: now
+  });
+}
+
 function validatePayload(payload) {
   if (!payload || typeof payload !== "object") {
     return { error: "Payload must be an object" };
@@ -134,6 +435,54 @@ function validatePayload(payload) {
     return { error: "summary is required" };
   }
   return {};
+}
+
+function validateRawEnvelope(payload) {
+  if (!payload || typeof payload !== "object") {
+    return { error: "Payload must be an object" };
+  }
+  if (payload.version !== 1) {
+    return { error: "raw telemetry version must be 1" };
+  }
+  if (!sourceKinds.has(payload.sourceKind)) {
+    return { error: "sourceKind is invalid" };
+  }
+  if (payload.streamKind !== undefined && !streamKinds.has(payload.streamKind)) {
+    return { error: "streamKind is invalid" };
+  }
+  if (typeof payload.projectSlug !== "string" || !payload.projectSlug.trim()) {
+    return { error: "projectSlug is required" };
+  }
+  if (typeof payload.streamId !== "string" || !payload.streamId.trim()) {
+    return { error: "streamId is required" };
+  }
+  if (!Number.isInteger(payload.sequence) || payload.sequence < 0) {
+    return { error: "sequence must be a non-negative integer" };
+  }
+  if (!payload.payload || typeof payload.payload !== "object" || Array.isArray(payload.payload)) {
+    return { error: "payload object is required" };
+  }
+  return {};
+}
+
+function normalizeRawEnvelope(payload, now) {
+  const sourceKind = payload.sourceKind;
+  return {
+    version: 1,
+    kind: "raw-telemetry",
+    sourceKind,
+    sourceId: truncate(nullableString(payload.sourceId) || `${sourceKind}:${payload.projectSlug}`, 240),
+    streamKind: payload.streamKind || defaultStreamKind(sourceKind),
+    projectSlug: truncate(payload.projectSlug.trim(), 120),
+    streamId: truncate(payload.streamId.trim(), 240),
+    sequence: payload.sequence,
+    generatedAt: nullableString(payload.generatedAt) || now,
+    cursor: payload.cursor && typeof payload.cursor === "object" && !Array.isArray(payload.cursor) ? payload.cursor : {},
+    metadata: payload.metadata && typeof payload.metadata === "object" && !Array.isArray(payload.metadata) ? payload.metadata : {},
+    payload: payload.payload,
+    truncated: Boolean(payload.truncated),
+    truncationReason: nullableString(payload.truncationReason)
+  };
 }
 
 function authenticate(request, env) {
@@ -342,6 +691,163 @@ function shouldStoreDurableHistory(payload, statusText) {
   }
   const telemetry = payload.telemetry && typeof payload.telemetry === "object" ? payload.telemetry : {};
   return Boolean(telemetry.durableHistory) || telemetry.kind === "summary" || terminalStatuses.has(statusText);
+}
+
+function defaultStreamKind(sourceKind) {
+  if (sourceKind === "runner-job") {
+    return "runner-job";
+  }
+  if (sourceKind === "local-workspace" || sourceKind === "codespace-worker") {
+    return "workspace";
+  }
+  return "codex-thread";
+}
+
+function sourceDatabaseId(envelope) {
+  return `${envelope.sourceKind}:${envelope.sourceId}`.slice(0, 300);
+}
+
+function streamDatabaseId(envelope) {
+  return `${envelope.streamKind}:${envelope.projectSlug}:${envelope.streamId}`.slice(0, 420);
+}
+
+function rawTelemetryKey(envelope, sha256) {
+  const prefix = envelope.streamKind === "runner-job" ? "runner-job" : envelope.streamKind;
+  const sequence = String(envelope.sequence).padStart(8, "0");
+  return [
+    "raw",
+    "v1",
+    prefix,
+    safePathSegment(envelope.projectSlug),
+    safePathSegment(envelope.streamId),
+    `${sequence}-${sha256.slice(0, 16)}.json.gz`
+  ].join("/");
+}
+
+function safePathSegment(value) {
+  return String(value || "unknown")
+    .replace(/[^a-zA-Z0-9._=-]+/gu, "-")
+    .replace(/^-+|-+$/gu, "")
+    .slice(0, 160) || "unknown";
+}
+
+function statusHintFromEnvelope(envelope) {
+  const metadata = envelope.metadata || {};
+  const payload = envelope.payload || {};
+  const candidates = [
+    metadata.status,
+    metadata.terminalStatus,
+    payload.status?.status,
+    payload.status,
+    payload.thread?.status,
+    payload.workspace?.status
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return truncate(candidate.trim(), 60);
+    }
+  }
+  return envelope.streamKind === "runner-job" ? "running" : "active";
+}
+
+function titleFromEnvelope(envelope) {
+  const metadata = envelope.metadata || {};
+  const payload = envelope.payload || {};
+  const candidates = [
+    metadata.title,
+    payload.title,
+    payload.thread?.title,
+    payload.workspace?.projectSlug,
+    payload.prompt?.title,
+    payload.prompt?.text
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return truncate(candidate.trim(), 180);
+    }
+  }
+  return truncate(envelope.streamId, 180);
+}
+
+function activityFromEnvelope(envelope) {
+  const metadata = envelope.metadata || {};
+  const payload = envelope.payload || {};
+  const candidates = [
+    metadata.latestActivity,
+    metadata.currentActivity,
+    payload.latestActivity,
+    payload.thread?.latestActivity,
+    payload.summary?.currentActivity,
+    payload.status?.status
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return truncate(candidate.trim(), 500);
+    }
+  }
+  return null;
+}
+
+function tokenUsageFromEnvelope(envelope) {
+  const metadata = envelope.metadata || {};
+  const payload = envelope.payload || {};
+  const usage =
+    metadata.tokenUsage ||
+    payload.tokenUsage ||
+    payload.thread?.tokenUsage ||
+    payload.codexJsonl?.tokenUsage ||
+    payload.summary?.cost ||
+    {};
+  return normalizeTokenUsage(usage);
+}
+
+function linkedRunnerJobIdFromEnvelope(envelope) {
+  const metadata = envelope.metadata || {};
+  const payload = envelope.payload || {};
+  const value = metadata.linkedRunnerJobId || payload.linkedRunnerJobId || payload.thread?.linkedRunnerJobId;
+  return typeof value === "string" && value.trim() ? truncate(value.trim(), 240) : null;
+}
+
+function createdAtFromEnvelope(envelope) {
+  const metadata = envelope.metadata || {};
+  const payload = envelope.payload || {};
+  const candidates = [
+    metadata.createdAt,
+    metadata.startedAt,
+    payload.createdAt,
+    payload.startedAt,
+    payload.thread?.createdAt,
+    payload.thread?.startedAt,
+    payload.status?.startedAt
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate;
+    }
+  }
+  return envelope.generatedAt;
+}
+
+async function sha256Hex(value) {
+  const data = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function gzipText(value) {
+  const data = new TextEncoder().encode(value);
+  if (typeof CompressionStream === "undefined") {
+    return data;
+  }
+  const stream = new CompressionStream("gzip");
+  const writer = stream.writable.getWriter();
+  await writer.write(data);
+  await writer.close();
+  return new Uint8Array(await new Response(stream.readable).arrayBuffer());
+}
+
+function byteLength(value) {
+  return new TextEncoder().encode(value).byteLength;
 }
 
 function normalizeEventType(value) {

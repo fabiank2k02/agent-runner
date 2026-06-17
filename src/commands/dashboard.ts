@@ -5,6 +5,7 @@ import { quoteRemotePath, shellQuote } from "../quote.js";
 import type { TaskState } from "../state.js";
 
 const DASHBOARD_LIVE_INTERVAL_SECONDS = 60;
+const DASHBOARD_RAW_INTERVAL_SECONDS = 300;
 const DASHBOARD_LAUNCH_TIMEOUT_MS = 90_000;
 const DASHBOARD_LAUNCH_POLL_MS = 3_000;
 
@@ -93,24 +94,52 @@ export function dashboardJobsUrl(endpoint: string): string {
   return url.toString();
 }
 
+export function dashboardVerifyUrl(endpoint: string, jobId: string): string {
+  const url = new URL(endpoint);
+  url.search = "";
+  url.hash = "";
+  url.searchParams.set("verifyJobId", jobId);
+  return url.toString();
+}
+
 async function waitForDashboardJob(endpoint: string, token: string, jobId: string): Promise<void> {
-  const url = dashboardJobsUrl(endpoint);
+  const verifyUrl = dashboardVerifyUrl(endpoint, jobId);
+  const jobsUrl = dashboardJobsUrl(endpoint);
   const deadline = Date.now() + DASHBOARD_LAUNCH_TIMEOUT_MS;
   let lastError = "";
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(url, {
+      const verifyResponse = await fetch(verifyUrl, {
         headers: {
           authorization: `Bearer ${token}`
         }
       });
-      const body = (await response.json().catch(() => ({}))) as { error?: string; jobs?: Array<{ id?: string }> };
-      if (!response.ok) {
-        lastError = body?.error || response.statusText;
-      } else if (Array.isArray(body.jobs) && body.jobs.some((job) => job.id === jobId)) {
+      const verifyBody = (await verifyResponse.json().catch(() => ({}))) as {
+        error?: string;
+        exists?: boolean;
+        jobs?: Array<{ id?: string }>;
+      };
+      if (verifyResponse.ok && verifyBody.exists === true) {
         return;
-      } else {
-        lastError = `job ${jobId} was not present in GET /api/jobs`;
+      }
+      if (verifyResponse.ok && Array.isArray(verifyBody.jobs) && verifyBody.jobs.some((job) => job.id === jobId)) {
+        return;
+      }
+      lastError = verifyResponse.ok
+        ? `job ${jobId} was not present in GET /api/ingest verification`
+        : verifyBody?.error || verifyResponse.statusText;
+
+      const jobsResponse = await fetch(jobsUrl, {
+        headers: {
+          authorization: `Bearer ${token}`
+        }
+      });
+      const jobsBody = (await jobsResponse.json().catch(() => ({}))) as { error?: string; jobs?: Array<{ id?: string }> };
+      if (jobsResponse.ok && Array.isArray(jobsBody.jobs) && jobsBody.jobs.some((job) => job.id === jobId)) {
+        return;
+      }
+      if (!jobsResponse.ok) {
+        lastError = jobsBody?.error || jobsResponse.statusText;
       }
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
@@ -136,12 +165,16 @@ function buildObserverScript(
     token: context.config.dashboard.token,
     intervalSeconds: context.config.dashboard.intervalSeconds,
     liveIntervalSeconds: DASHBOARD_LIVE_INTERVAL_SECONDS,
+    rawIntervalSeconds: DASHBOARD_RAW_INTERVAL_SECONDS,
     model: context.config.dashboard.model,
     reasoningEffort: context.config.dashboard.reasoningEffort,
     maxLogLines: context.config.dashboard.maxLogLines,
+    maxRawLogLines: Math.max(20, Math.min(500, context.config.dashboard.maxLogLines)),
     costs: context.config.dashboard.costs,
     projectSlug: context.layout.projectSlug,
     remoteHost: context.config.remote.host,
+    remoteUser: context.config.remote.user,
+    remotePort: context.config.remote.port,
     taskId: task.taskId,
     taskSessionName: task.sessionName,
     observerSession,
@@ -149,7 +182,23 @@ function buildObserverScript(
     statusFile: task.statusFile,
     logFile: task.logFile,
     summaryFile,
-    codexHome
+    codexHome,
+    codex: {
+      model: context.config.codex.model,
+      reasoningEffort: context.config.codex.reasoningEffort,
+      sandbox: context.config.codex.sandbox,
+      approval: context.config.codex.approval,
+      yolo: context.config.codex.yolo,
+      extraArgs: context.config.codex.extraArgs
+    },
+    digitalOcean: {
+      region: context.config.digitalOcean.region,
+      size: context.config.digitalOcean.size,
+      image: context.config.digitalOcean.image,
+      dropletName: context.config.digitalOcean.dropletName,
+      hourlyPriceUsd: context.config.digitalOcean.hourlyPriceUsd || context.config.dashboard.costs.digitalOceanHourlyUsd
+    },
+    runnerVersion: "0.1.0"
   };
 
   return `#!/usr/bin/env node
@@ -169,6 +218,7 @@ const hostPath = [
   process.env.PATH || ""
 ].filter(Boolean).join(":");
 const terminalStatuses = new Set(["completed", "failed", "stopped"]);
+let rawSequence = 0;
 
 ${telemetryRuntimeSource()}
 
@@ -211,6 +261,38 @@ function tailLines(file, maxLines) {
     return "";
   }
   return raw.split(/\\r?\\n/u).slice(-maxLines).join("\\n");
+}
+
+function redactSecrets(input) {
+  let output = String(input || "");
+  output = output.replace(/\\b(OPENAI_API_KEY|CODEX_API_KEY|CODEX_ACCESS_TOKEN|DIGITALOCEAN_TOKEN|DIGITALOCEAN_ACCESS_TOKEN|CLOUDFLARE_API_TOKEN|CLOUDFLARE_TOKEN|GH_TOKEN|GITHUB_TOKEN)\\b\\s*[:=]\\s*["']?[^"'\\s,;]+/giu, (_match, name) => name + "=[REDACTED_SECRET]");
+  output = output.replace(/\\bDATABASE_URL\\s*[:=]\\s*["']?[^"'\\s,;]+/giu, "DATABASE_URL=[REDACTED_SECRET]");
+  output = output.replace(/\\b(postgres(?:ql)?:\\/\\/[^:\\s/]+):[^@\\s]+@/giu, "$1:[REDACTED_SECRET]@");
+  output = output.replace(/\\bBearer\\s+[a-z0-9._~+/=-]{16,}/giu, "Bearer [REDACTED_SECRET]");
+  output = output.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY-----/gu, "[REDACTED_SECRET]");
+  output = output.replace(/\\b(?:sk|rk|pk|ghp|github_pat|glpat|dop)_[-a-z0-9_]{20,}\\b/giu, "[REDACTED_SECRET]");
+  return output;
+}
+
+function redactValue(value) {
+  if (typeof value === "string") {
+    return redactSecrets(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactValue(item));
+  }
+  if (value && typeof value === "object") {
+    const result = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (/(^|_)(token|secret|password|private[_-]?key|auth)(_|$)/iu.test(key)) {
+        result[key] = "[REDACTED_SECRET]";
+      } else {
+        result[key] = redactValue(item);
+      }
+    }
+    return result;
+  }
+  return value;
 }
 
 function buildFallbackSummary(status, logTail, prompt = "", events = []) {
@@ -510,6 +592,89 @@ async function postUpdate(payload) {
   }
 }
 
+async function safePostRawTelemetry(phase, prompt) {
+  try {
+    const status = readJson(config.statusFile);
+    const logTail = redactSecrets(tailLines(config.logFile, config.maxRawLogLines));
+    const lines = logTail ? logTail.split(/\\r?\\n/u).filter(Boolean) : [];
+    const generatedAt = new Date().toISOString();
+    const state = typeof status.status === "string" ? status.status : "unknown";
+    rawSequence += 1;
+    await postUpdate({
+      version: 1,
+      kind: "raw-telemetry",
+      sourceKind: "runner-job",
+      sourceId: "runner-observer:" + config.projectSlug + ":" + config.observerSession,
+      streamKind: "runner-job",
+      projectSlug: config.projectSlug,
+      streamId: config.taskId,
+      sequence: rawSequence,
+      generatedAt,
+      cursor: {
+        logTailLineCount: lines.length,
+        logTailChars: logTail.length,
+        statusUpdatedAt: status.finishedAt || status.startedAt || null,
+        phase
+      },
+      metadata: {
+        telemetrySchemaVersion: 1,
+        sourceKind: "runner-job",
+        sourceId: "runner-observer:" + config.projectSlug + ":" + config.observerSession,
+        streamKind: "runner-job",
+        phase,
+        status: state,
+        terminal: terminalStatuses.has(state),
+        projectSlug: config.projectSlug,
+        taskId: config.taskId,
+        sessionName: config.taskSessionName,
+        observerSessionName: config.observerSession,
+        remoteHost: config.remoteHost,
+        remoteUser: config.remoteUser,
+        remotePort: config.remotePort,
+        runnerVersion: config.runnerVersion,
+        codex: config.codex,
+        digitalOcean: config.digitalOcean,
+        hourlyPriceUsd: config.digitalOcean.hourlyPriceUsd || config.costs.digitalOceanHourlyUsd || null,
+        latestActivity: "Raw runner telemetry uploaded",
+        generatedAt
+      },
+      payload: redactValue({
+        projectSlug: config.projectSlug,
+        taskId: config.taskId,
+        sessionName: config.taskSessionName,
+        observerSessionName: config.observerSession,
+        remoteHost: config.remoteHost,
+        prompt: {
+          text: clip(prompt, 32768),
+          sha256: stableId(prompt)
+        },
+        status,
+        codexJsonl: {
+          logFile: config.logFile,
+          lineCount: lines.length,
+          lines,
+          tokenUsage: extractTokenUsage(logTail)
+        },
+        runner: {
+          version: config.runnerVersion,
+          telemetrySchemaVersion: 1,
+          model: config.codex.model || null,
+          reasoningEffort: config.codex.reasoningEffort,
+          sandbox: config.codex.sandbox,
+          approval: config.codex.approval,
+          yolo: config.codex.yolo
+        },
+        provider: {
+          remoteHost: config.remoteHost,
+          digitalOcean: config.digitalOcean
+        }
+      })
+    });
+  } catch (error) {
+    console.error(new Date().toISOString(), "raw telemetry upload failed:", error instanceof Error ? error.message : String(error));
+  }
+}
+
 function buildTelemetry(kind, prompt, status, logTail, summary, durableHistory) {
   const events = extractLiveEvents(logTail, { limit: 220 });
   const files = aggregateFileActivity(events, 140);
@@ -655,10 +820,17 @@ async function main() {
   let status = "unknown";
   let latestSummary = buildFallbackSummary(readJson(config.statusFile), "", prompt, []);
   let lastSummaryAt = 0;
+  let lastRawAt = 0;
+  await safePostRawTelemetry("initial", prompt);
+  lastRawAt = Date.now();
   while (true) {
     const live = await liveTick(prompt, latestSummary);
     status = live.status;
     latestSummary = live.summary;
+    if (Date.now() - lastRawAt >= config.rawIntervalSeconds * 1000) {
+      await safePostRawTelemetry("interval", prompt);
+      lastRawAt = Date.now();
+    }
     const shouldSummarize = terminalStatuses.has(status) || Date.now() - lastSummaryAt >= config.intervalSeconds * 1000;
     if (shouldSummarize) {
       const durable = await summaryTick(prompt);
@@ -667,6 +839,7 @@ async function main() {
       lastSummaryAt = Date.now();
     }
     if (terminalStatuses.has(status)) {
+      await safePostRawTelemetry("terminal", prompt);
       break;
     }
     await new Promise((resolve) => setTimeout(resolve, config.liveIntervalSeconds * 1000));

@@ -16,7 +16,8 @@ export async function onRequestGet({ request, env, params }) {
     `SELECT id, project_slug, task_id, session_name, observer_session_name, remote_host,
       status, exit_code, started_at, finished_at, updated_at, last_seen_at,
       current_activity, is_stuck, progress_percent, progress_confidence,
-      eta_minutes_min, eta_minutes_max, eta_confidence, summary_json, status_json, telemetry_json, log_file, log_tail
+      eta_minutes_min, eta_minutes_max, eta_confidence, summary_json, status_json, telemetry_json, log_file, log_tail,
+      last_raw_telemetry_at, raw_chunk_count, raw_payload_available, raw_status
      FROM jobs
      WHERE id = ?`
   )
@@ -37,14 +38,26 @@ export async function onRequestGet({ request, env, params }) {
     .bind(id)
     .all();
 
-  return cors(json({ job: mapJobRow(job), history: (history.results || []).map(mapSummaryRow) }));
+  const chunks = await env.DB.prepare(
+    `SELECT id, sequence, r2_key, byte_size, uncompressed_byte_size, sha256,
+      created_at, generated_at, cursor_json, metadata_json, terminal_status
+     FROM telemetry_chunks
+     WHERE stream_kind = 'runner-job' AND stream_id = ?
+     ORDER BY sequence DESC
+     LIMIT 50`
+  )
+    .bind(`runner-job:${job.project_slug}:${job.task_id}`)
+    .all();
+
+  return cors(json({
+    job: mapJobRow(job),
+    history: (history.results || []).map(mapSummaryRow),
+    rawChunks: (chunks.results || []).map(mapChunkRow)
+  }));
 }
 
 function authenticateRead(request, env) {
   if (request.headers.get("cf-access-jwt-assertion") || request.headers.get("cf-access-authenticated-user-email")) {
-    return null;
-  }
-  if (hasCloudflareAccessSession(request)) {
     return null;
   }
 
@@ -60,11 +73,6 @@ function authenticateRead(request, env) {
     return { status: 401, body: { error: "Unauthorized" } };
   }
   return null;
-}
-
-function hasCloudflareAccessSession(request) {
-  const cookie = request.headers.get("cookie") || "";
-  return /(?:^|;\s*)CF_Authorization=/.test(cookie) || /(?:^|;\s*)CF_AppSession=/.test(cookie);
 }
 
 function mapJobRow(row) {
@@ -92,7 +100,18 @@ function mapJobRow(row) {
     statusJson: parseJson(row.status_json, {}),
     telemetry: parseJson(row.telemetry_json, null),
     logFile: row.log_file,
-    logTail: row.log_tail
+    logTail: row.log_tail,
+    rawTelemetry: {
+      latestRawTelemetryAt: row.last_raw_telemetry_at,
+      rawChunkCount: row.raw_chunk_count || 0,
+      rawPayloadAvailable: Boolean(row.raw_payload_available),
+      rawStatus: row.raw_status,
+      rawAgeSeconds: ageSeconds(row.last_raw_telemetry_at),
+      rawStale: isRawStale(row.status, row.last_raw_telemetry_at, 10 * 60),
+      processedAgeSeconds: ageSeconds(row.updated_at),
+      processedStale: isProcessedStale(row.status, row.last_raw_telemetry_at, row.updated_at),
+      rawAvailableButUnprocessed: Boolean(row.last_raw_telemetry_at && row.updated_at && Date.parse(row.last_raw_telemetry_at) - Date.parse(row.updated_at) > 10 * 60 * 1000)
+    }
   };
 }
 
@@ -104,6 +123,46 @@ function mapSummaryRow(row) {
     summary: parseJson(row.summary_json, {}),
     statusJson: parseJson(row.status_json, {})
   };
+}
+
+function mapChunkRow(row) {
+  return {
+    id: row.id,
+    sequence: row.sequence,
+    r2Key: row.r2_key,
+    byteSize: row.byte_size,
+    uncompressedByteSize: row.uncompressed_byte_size,
+    sha256: row.sha256,
+    createdAt: row.created_at,
+    generatedAt: row.generated_at,
+    cursor: parseJson(row.cursor_json, {}),
+    metadata: parseJson(row.metadata_json, {}),
+    terminalStatus: row.terminal_status,
+    storedInR2: Boolean(row.r2_key)
+  };
+}
+
+function ageSeconds(value) {
+  if (!value) {
+    return null;
+  }
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, Math.round((Date.now() - timestamp) / 1000)) : null;
+}
+
+function isRawStale(status, value, staleSeconds) {
+  if (["completed", "failed", "stopped"].includes(status)) {
+    return false;
+  }
+  const age = ageSeconds(value);
+  return age === null ? false : age > staleSeconds;
+}
+
+function isProcessedStale(status, rawAt, processedAt) {
+  if (["completed", "failed", "stopped"].includes(status) || !rawAt || !processedAt) {
+    return false;
+  }
+  return Date.parse(rawAt) - Date.parse(processedAt) > 10 * 60 * 1000;
 }
 
 function parseJson(value, fallback) {

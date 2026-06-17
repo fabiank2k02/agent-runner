@@ -24,6 +24,9 @@ declare const configFileSchema: z.ZodObject<{
     rsync: z.ZodDefault<z.ZodObject<{
         excludes: z.ZodDefault<z.ZodArray<z.ZodString>>;
     }, z.core.$strip>>;
+    telemetry: z.ZodDefault<z.ZodObject<{
+        denyGlobs: z.ZodDefault<z.ZodArray<z.ZodString>>;
+    }, z.core.$strip>>;
     digitalOcean: z.ZodDefault<z.ZodObject<{
         region: z.ZodOptional<z.ZodString>;
         size: z.ZodOptional<z.ZodString>;
@@ -75,6 +78,9 @@ export interface ResolvedConfig {
     };
     rsync: {
         excludes: string[];
+    };
+    telemetry: {
+        denyGlobs: string[];
     };
     digitalOcean: {
         token?: string;

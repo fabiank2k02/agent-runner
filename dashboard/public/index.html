@@ -48,12 +48,17 @@
     </header>
 
     <main class="shell">
+      <nav class="view-tabs" aria-label="Dashboard views">
+        <button class="active" type="button" data-view="jobs">Runner Jobs</button>
+        <button type="button" data-view="threads">Local Threads</button>
+        <button type="button" data-view="overview">Overview</button>
+      </nav>
       <section class="workspace">
         <aside class="job-list" aria-label="Jobs">
           <div class="section-head">
             <div>
-              <p class="eyebrow">Queue</p>
-              <h2>Jobs</h2>
+              <p class="eyebrow" id="list-eyebrow">Queue</p>
+              <h2 id="list-title">Jobs</h2>
             </div>
             <span id="job-count" class="list-count">0 jobs</span>
           </div>

@@ -14,3 +14,4 @@ export interface DashboardObserverResult {
 export declare function assertDashboardLaunchConfig(context: CommandContext): void;
 export declare function startDashboardObserver(context: CommandContext, task: TaskState): Promise<DashboardObserverResult>;
 export declare function dashboardJobsUrl(endpoint: string): string;
+export declare function dashboardVerifyUrl(endpoint: string, jobId: string): string;

@@ -7,6 +7,7 @@ import { doctor } from "./commands/doctor.js";
 import { initProject } from "./commands/init.js";
 import { pullProject, pushProject } from "./commands/sync.js";
 import { attachTask, runTask, stopTask, taskLogs, taskStatus } from "./commands/tasks.js";
+import { telemetryFlush, telemetryService, telemetryStart, telemetryStatus, telemetryStop } from "./commands/telemetry.js";
 import { upDevcontainer } from "./commands/up.js";
 import { createCommandContext } from "./context.js";
 import { DashboardLaunchError } from "./commands/dashboard.js";
@@ -142,6 +143,47 @@ export function buildProgram() {
         const globals = getGlobals(program);
         await stopTask(createContext(globals), taskId);
         write(globals, { ok: true }, "task stopped");
+    });
+    const telemetry = program
+        .command("telemetry")
+        .description("Manage local Codex/workspace telemetry uploads");
+    telemetry
+        .command("start")
+        .description("Start the local telemetry background service")
+        .action(async () => {
+        const globals = getGlobals(program);
+        const result = await telemetryStart(createContext(globals));
+        write(globals, result, result.message);
+    });
+    telemetry
+        .command("stop")
+        .description("Stop the local telemetry background service")
+        .action(async () => {
+        const globals = getGlobals(program);
+        const result = await telemetryStop(createContext(globals));
+        write(globals, result, result.message);
+    });
+    telemetry
+        .command("status")
+        .description("Show local telemetry service and cursor state")
+        .action(async () => {
+        const globals = getGlobals(program);
+        const result = await telemetryStatus(createContext(globals));
+        write(globals, result, formatTelemetryStatus(result));
+    });
+    telemetry
+        .command("flush")
+        .description("Upload one local telemetry batch now")
+        .action(async () => {
+        const globals = getGlobals(program);
+        const result = await telemetryFlush(createContext(globals));
+        write(globals, result, formatTelemetryFlush(result));
+    });
+    telemetry
+        .command("service", { hidden: true })
+        .description("Run the local telemetry service loop")
+        .action(async () => {
+        await telemetryService(createContext(getGlobals(program)));
     });
     const droplet = program
         .command("droplet")
@@ -309,5 +351,21 @@ function formatTaskStarted(result) {
         lines.push(`dashboard observer failed: ${result.dashboardObserver.error}`);
     }
     return lines.join("\n");
+}
+function formatTelemetryStatus(result) {
+    return [
+        `state: ${result.statePath}`,
+        `running: ${result.running ? "yes" : "no"}`,
+        result.pid ? `pid: ${result.pid}` : "",
+        result.lastUploadTime ? `last upload: ${result.lastUploadTime}` : "last upload: never",
+        `streams: ${result.knownStreams?.length ?? 0}`
+    ].filter(Boolean).join("\n");
+}
+function formatTelemetryFlush(result) {
+    return [
+        `uploaded: ${result.uploaded}`,
+        `skipped: ${result.skipped}`,
+        `state: ${result.statePath}`
+    ].join("\n");
 }
 //# sourceMappingURL=program.js.map

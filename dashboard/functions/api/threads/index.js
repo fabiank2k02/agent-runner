@@ -14,19 +14,44 @@ export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
   const limit = Math.max(1, Math.min(200, Number.parseInt(url.searchParams.get("limit") || "100", 10)));
   const result = await env.DB.prepare(
-    `SELECT id, project_slug, task_id, session_name, observer_session_name, remote_host,
-      status, exit_code, started_at, finished_at, updated_at, last_seen_at,
-      current_activity, is_stuck, progress_percent, progress_confidence,
-      eta_minutes_min, eta_minutes_max, eta_confidence, summary_json, status_json, telemetry_json, log_file,
-      last_raw_telemetry_at, raw_chunk_count, raw_payload_available, raw_status
-     FROM jobs
+    `SELECT id, source_kind, source_id, stream_kind, project_slug, thread_id, title,
+      status, latest_activity, created_at, updated_at, last_telemetry_at,
+      latest_raw_telemetry_at, token_usage_json, linked_runner_job_id,
+      raw_chunk_count, metadata_json
+     FROM local_threads
      ORDER BY updated_at DESC
      LIMIT ?`
   )
     .bind(limit)
     .all();
 
-  return cors(json({ jobs: (result.results || []).map(mapJobRow) }));
+  return cors(json({ threads: (result.results || []).map(mapThreadRow) }));
+}
+
+function mapThreadRow(row) {
+  return {
+    id: row.id,
+    sourceKind: row.source_kind,
+    sourceId: row.source_id,
+    streamKind: row.stream_kind,
+    projectSlug: row.project_slug,
+    threadId: row.thread_id,
+    title: row.title,
+    status: row.status,
+    latestActivity: row.latest_activity,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastTelemetryAt: row.last_telemetry_at,
+    latestRawTelemetryAt: row.latest_raw_telemetry_at,
+    tokenUsage: parseJson(row.token_usage_json, {}),
+    linkedRunnerJobId: row.linked_runner_job_id,
+    rawChunkCount: row.raw_chunk_count || 0,
+    metadata: parseJson(row.metadata_json, {}),
+    freshness: {
+      rawAgeSeconds: ageSeconds(row.latest_raw_telemetry_at),
+      rawStale: isRawStale(row.status, row.latest_raw_telemetry_at, 45 * 60)
+    }
+  };
 }
 
 function authenticateRead(request, env) {
@@ -48,45 +73,6 @@ function authenticateRead(request, env) {
   return null;
 }
 
-function mapJobRow(row) {
-  return {
-    id: row.id,
-    projectSlug: row.project_slug,
-    taskId: row.task_id,
-    sessionName: row.session_name,
-    observerSessionName: row.observer_session_name,
-    remoteHost: row.remote_host,
-    status: row.status,
-    exitCode: row.exit_code,
-    startedAt: row.started_at,
-    finishedAt: row.finished_at,
-    updatedAt: row.updated_at,
-    lastSeenAt: row.last_seen_at,
-    currentActivity: row.current_activity,
-    isStuck: Boolean(row.is_stuck),
-    progressPercent: row.progress_percent,
-    progressConfidence: row.progress_confidence,
-    etaMinutesMin: row.eta_minutes_min,
-    etaMinutesMax: row.eta_minutes_max,
-    etaConfidence: row.eta_confidence,
-    summary: parseJson(row.summary_json, {}),
-    statusJson: parseJson(row.status_json, {}),
-    telemetry: parseJson(row.telemetry_json, null),
-    logFile: row.log_file,
-    rawTelemetry: {
-      latestRawTelemetryAt: row.last_raw_telemetry_at,
-      rawChunkCount: row.raw_chunk_count || 0,
-      rawPayloadAvailable: Boolean(row.raw_payload_available),
-      rawStatus: row.raw_status,
-      rawAgeSeconds: ageSeconds(row.last_raw_telemetry_at),
-      rawStale: isRawStale(row.status, row.last_raw_telemetry_at, 10 * 60),
-      processedAgeSeconds: ageSeconds(row.updated_at),
-      processedStale: isProcessedStale(row.status, row.last_raw_telemetry_at, row.updated_at),
-      rawAvailableButUnprocessed: Boolean(row.last_raw_telemetry_at && row.updated_at && Date.parse(row.last_raw_telemetry_at) - Date.parse(row.updated_at) > 10 * 60 * 1000)
-    }
-  };
-}
-
 function ageSeconds(value) {
   if (!value) {
     return null;
@@ -101,13 +87,6 @@ function isRawStale(status, value, staleSeconds) {
   }
   const age = ageSeconds(value);
   return age === null ? false : age > staleSeconds;
-}
-
-function isProcessedStale(status, rawAt, processedAt) {
-  if (["completed", "failed", "stopped"].includes(status) || !rawAt || !processedAt) {
-    return false;
-  }
-  return Date.parse(rawAt) - Date.parse(processedAt) > 10 * 60 * 1000;
 }
 
 function parseJson(value, fallback) {

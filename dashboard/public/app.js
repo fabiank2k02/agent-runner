@@ -1,10 +1,18 @@
 const tokenKey = "agent-runner-dashboard-token";
 const state = {
   token: localStorage.getItem(tokenKey) || "",
+  view: "jobs",
   jobs: [],
+  threads: [],
+  activity: [],
   selectedId: null,
+  selectedThreadId: null,
   detailJob: null,
   detailHistory: [],
+  detailThread: null,
+  detailRawChunks: [],
+  detailLatestActivity: [],
+  linkedRunnerJob: null,
   eventFilter: "activity",
   seenEvents: new Map(),
   loading: false,
@@ -14,28 +22,46 @@ const state = {
 
 const elements = {
   refreshButton: document.querySelector("#refresh-button"),
+  viewTabs: document.querySelector(".view-tabs"),
   jobs: document.querySelector("#jobs"),
   detail: document.querySelector("#detail"),
   lastUpdated: document.querySelector("#last-updated"),
   jobCount: document.querySelector("#job-count"),
+  listEyebrow: document.querySelector("#list-eyebrow"),
+  listTitle: document.querySelector("#list-title"),
   running: document.querySelector("#metric-running"),
   stuck: document.querySelector("#metric-stuck"),
   completed: document.querySelector("#metric-completed"),
   failed: document.querySelector("#metric-failed")
 };
 
-elements.refreshButton.addEventListener("click", () => loadJobs());
+elements.refreshButton.addEventListener("click", () => loadDashboard());
+for (const button of elements.viewTabs.querySelectorAll("[data-view]")) {
+  button.addEventListener("click", () => {
+    state.view = button.dataset.view;
+    render();
+    if (state.view === "jobs" && state.selectedId) {
+      loadDetail(state.selectedId, { preserveList: true });
+    } else if (state.view === "threads" && state.selectedThreadId) {
+      loadThreadDetail(state.selectedThreadId, { preserveList: true });
+    }
+  });
+}
 
 setInterval(() => {
   if (!state.loading) {
-    loadJobs({ quiet: true });
+    loadDashboard({ quiet: true });
   }
 }, 15000);
 
 render();
-loadJobs();
+loadDashboard();
 
 async function loadJobs(options = {}) {
+  return loadDashboard(options);
+}
+
+async function loadDashboard(options = {}) {
   state.loading = true;
   state.error = null;
   setRefreshing(true);
@@ -44,17 +70,32 @@ async function loadJobs(options = {}) {
   }
 
   try {
-    const response = await api("/api/jobs");
-    state.jobs = response.jobs || [];
+    const [jobsResponse, threadsResponse, activityResponse] = await Promise.all([
+      api("/api/jobs"),
+      api("/api/threads").catch(() => ({ threads: [] })),
+      api("/api/activity").catch(() => ({ activity: [] }))
+    ]);
+    state.jobs = jobsResponse.jobs || [];
+    state.threads = threadsResponse.threads || [];
+    state.activity = activityResponse.activity || [];
     if (!state.jobs.some((job) => job.id === state.selectedId)) {
       state.selectedId = state.jobs[0]?.id || null;
       state.detailJob = null;
       state.detailHistory = [];
     }
+    if (!state.threads.some((thread) => thread.id === state.selectedThreadId)) {
+      state.selectedThreadId = state.threads[0]?.id || null;
+      state.detailThread = null;
+      state.detailRawChunks = [];
+      state.detailLatestActivity = [];
+      state.linkedRunnerJob = null;
+    }
     state.lastUpdatedAt = new Date();
     render();
-    if (state.selectedId) {
+    if (state.view === "jobs" && state.selectedId) {
       await loadDetail(state.selectedId, { preserveList: true });
+    } else if (state.view === "threads" && state.selectedThreadId) {
+      await loadThreadDetail(state.selectedThreadId, { preserveList: true });
     }
   } catch (error) {
     state.error = error;
@@ -78,7 +119,26 @@ async function loadDetail(id, options = {}) {
     const data = await api("/api/jobs/" + encodeURIComponent(id));
     state.detailJob = data.job;
     state.detailHistory = data.history || [];
-    renderDetail(data.job, data.history || []);
+    state.detailRawChunks = data.rawChunks || [];
+    renderDetail(data.job, data.history || [], data.rawChunks || []);
+  } catch (error) {
+    renderError(error, "detail");
+  }
+}
+
+async function loadThreadDetail(id, options = {}) {
+  state.selectedThreadId = id;
+  if (!options.preserveList) {
+    render();
+  }
+
+  try {
+    const data = await api("/api/threads/" + encodeURIComponent(id));
+    state.detailThread = data.thread;
+    state.detailRawChunks = data.rawChunks || [];
+    state.detailLatestActivity = data.latestActivity || [];
+    state.linkedRunnerJob = data.linkedRunnerJob || null;
+    renderThreadDetail(data.thread, data.rawChunks || [], data.latestActivity || [], data.linkedRunnerJob || null);
   } catch (error) {
     renderError(error, "detail");
   }
@@ -98,12 +158,30 @@ async function api(path) {
 }
 
 function render() {
+  renderViewTabs();
   renderMetrics();
-  renderJobs();
+  if (state.view === "threads") {
+    renderThreads();
+  } else if (state.view === "overview") {
+    renderOverview();
+  } else {
+    renderJobs();
+  }
   renderFreshness();
-  if (!state.selectedId) {
+  if (state.view === "jobs" && !state.selectedId) {
     elements.detail.className = "detail";
     elements.detail.innerHTML = state.loading ? detailSkeleton() : emptyDetail();
+  } else if (state.view === "threads" && !state.selectedThreadId) {
+    elements.detail.className = "detail";
+    elements.detail.innerHTML = state.loading ? detailSkeleton() : emptyState("No local threads", "Local Codex telemetry will appear after the local service uploads.");
+  } else if (state.view === "overview") {
+    renderOverviewDetail();
+  }
+}
+
+function renderViewTabs() {
+  for (const button of elements.viewTabs.querySelectorAll("[data-view]")) {
+    button.classList.toggle("active", button.dataset.view === state.view);
   }
 }
 
@@ -112,7 +190,6 @@ function renderMetrics() {
   elements.stuck.textContent = state.jobs.filter((job) => job.isStuck).length;
   elements.completed.textContent = state.jobs.filter((job) => job.status === "completed").length;
   elements.failed.textContent = state.jobs.filter((job) => job.status === "failed").length;
-  elements.jobCount.textContent = `${state.jobs.length} ${state.jobs.length === 1 ? "job" : "jobs"}`;
 }
 
 function renderFreshness() {
@@ -125,6 +202,9 @@ function renderFreshness() {
 }
 
 function renderJobs() {
+  elements.listEyebrow.textContent = "Remote runners";
+  elements.listTitle.textContent = "Runner Jobs";
+  elements.jobCount.textContent = `${state.jobs.length} ${state.jobs.length === 1 ? "job" : "jobs"}`;
   if (state.loading && !state.jobs.length) {
     elements.jobs.innerHTML = listSkeleton();
     return;
@@ -167,7 +247,7 @@ function renderJobs() {
         </span>
         <span class="job-telemetry-line">
           <span>${escapeHtml(eventCount ? `${eventCount} events` : "no events")}</span>
-          <span>${escapeHtml(formatSpendSource(telemetry?.spend || job.summary?.cost))}</span>
+          <span>${escapeHtml(formatRawLine(job.rawTelemetry) || formatSpendSource(telemetry?.spend || job.summary?.cost))}</span>
         </span>
       </button>
     `;
@@ -178,7 +258,116 @@ function renderJobs() {
   }
 }
 
-function renderDetail(job, history) {
+function renderThreads() {
+  elements.listEyebrow.textContent = "Local Codex";
+  elements.listTitle.textContent = "Local Threads";
+  elements.jobCount.textContent = `${state.threads.length} ${state.threads.length === 1 ? "thread" : "threads"}`;
+  if (state.loading && !state.threads.length) {
+    elements.jobs.innerHTML = listSkeleton();
+    return;
+  }
+  if (!state.threads.length) {
+    elements.jobs.innerHTML = emptyState("No local threads", "Run agent-runner telemetry flush or start the local service.", { compact: true });
+    return;
+  }
+  elements.jobs.innerHTML = state.threads.map((thread) => {
+    const status = thread.status || "unknown";
+    const className = statusClass(status);
+    const title = thread.title || thread.threadId;
+    return `
+      <button class="job-row thread-row status-${className} ${thread.id === state.selectedThreadId ? "active" : ""}" data-thread-id="${escapeAttribute(thread.id)}">
+        <span class="job-row-main">
+          <span class="row-leading">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span class="project" title="${escapeAttribute(thread.projectSlug)}">${escapeHtml(thread.projectSlug)}</span>
+          </span>
+          <span class="entity-pill">${escapeHtml(formatSourceKind(thread.sourceKind))}</span>
+        </span>
+        <span class="job-meta-line">
+          <span class="task-id" title="${escapeAttribute(title)}">${escapeHtml(title)}</span>
+          <span class="time">${escapeHtml(formatTime(thread.updatedAt))}</span>
+        </span>
+        <span class="activity" title="${escapeAttribute(thread.latestActivity || "")}">${escapeHtml(thread.latestActivity || "No local activity reported")}</span>
+        <span class="job-telemetry-line">
+          <span>${escapeHtml(formatStatus(status))}</span>
+          <span>${escapeHtml(formatRawLine({ rawChunkCount: thread.rawChunkCount, latestRawTelemetryAt: thread.latestRawTelemetryAt, rawStale: thread.freshness?.rawStale }))}</span>
+        </span>
+      </button>
+    `;
+  }).join("");
+  for (const row of elements.jobs.querySelectorAll("[data-thread-id]")) {
+    row.addEventListener("click", () => loadThreadDetail(row.dataset.threadId));
+  }
+}
+
+function renderOverview() {
+  elements.listEyebrow.textContent = "Recent";
+  elements.listTitle.textContent = "Activity";
+  elements.jobCount.textContent = `${state.activity.length} items`;
+  const items = state.activity.length ? state.activity : [
+    ...state.jobs.slice(0, 10).map((job) => ({
+      type: "runner-job",
+      label: "Runner job",
+      id: job.id,
+      projectSlug: job.projectSlug,
+      title: job.taskId,
+      status: job.status,
+      activity: job.currentActivity,
+      updatedAt: job.updatedAt,
+      rawChunkCount: job.rawTelemetry?.rawChunkCount || 0,
+      latestRawTelemetryAt: job.rawTelemetry?.latestRawTelemetryAt
+    })),
+    ...state.threads.slice(0, 10).map((thread) => ({
+      type: thread.sourceKind === "codex-ide-thread" ? "ide-thread" : thread.sourceKind === "local-workspace" ? "workspace" : "cli-thread",
+      label: thread.sourceKind === "codex-ide-thread" ? "IDE thread" : thread.sourceKind === "local-workspace" ? "Workspace telemetry" : "CLI thread",
+      id: thread.id,
+      projectSlug: thread.projectSlug,
+      title: thread.title || thread.threadId,
+      status: thread.status,
+      activity: thread.latestActivity,
+      updatedAt: thread.updatedAt,
+      rawChunkCount: thread.rawChunkCount || 0,
+      latestRawTelemetryAt: thread.latestRawTelemetryAt
+    }))
+  ].sort((left, right) => Date.parse(right.updatedAt || "") - Date.parse(left.updatedAt || ""));
+  if (!items.length) {
+    elements.jobs.innerHTML = emptyState("No activity", "Runner jobs and local threads will appear here after ingest.", { compact: true });
+    return;
+  }
+  elements.jobs.innerHTML = items.map((item) => `
+    <button class="job-row activity-row status-${statusClass(item.status)}" data-activity-type="${escapeAttribute(item.type)}" data-activity-id="${escapeAttribute(item.id)}">
+      <span class="job-row-main">
+        <span class="row-leading">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span class="project">${escapeHtml(item.projectSlug)}</span>
+        </span>
+        <span class="entity-pill">${escapeHtml(item.label)}</span>
+      </span>
+      <span class="job-meta-line">
+        <span class="task-id" title="${escapeAttribute(item.title)}">${escapeHtml(item.title)}</span>
+        <span class="time">${escapeHtml(formatTime(item.updatedAt))}</span>
+      </span>
+      <span class="activity">${escapeHtml(item.activity || "No activity reported")}</span>
+      <span class="job-telemetry-line">
+        <span>${escapeHtml(formatStatus(item.status))}</span>
+        <span>${escapeHtml(formatRawLine(item))}</span>
+      </span>
+    </button>
+  `).join("");
+  for (const row of elements.jobs.querySelectorAll("[data-activity-id]")) {
+    row.addEventListener("click", () => {
+      if (row.dataset.activityType === "runner-job") {
+        state.view = "jobs";
+        loadDetail(row.dataset.activityId);
+      } else {
+        state.view = "threads";
+        loadThreadDetail(row.dataset.activityId);
+      }
+    });
+  }
+}
+
+function renderDetail(job, history, rawChunks = []) {
   const summary = job.summary || {};
   const telemetry = normalizedTelemetry(job);
   const status = job.isStuck ? "stuck" : job.status || "unknown";
@@ -228,6 +417,7 @@ function renderDetail(job, history) {
 
     <div class="detail-body">
       ${spendBlock(spend)}
+      ${rawTelemetryBlock(job.rawTelemetry, rawChunks, "Runner Raw Telemetry")}
       ${goalsBlock(goals, subgoals, percent)}
       ${telemetryBlock(events, files, newEventIds)}
       ${historyBlock(history)}
@@ -242,6 +432,91 @@ function renderDetail(job, history) {
     });
   }
   markEventsSeen(job.id, events);
+}
+
+function renderThreadDetail(thread, rawChunks, latestActivity, linkedRunnerJob) {
+  const status = thread.status || "unknown";
+  const className = statusClass(status);
+  const title = thread.title || thread.threadId;
+  const usage = thread.tokenUsage || {};
+  elements.detail.className = `detail status-${className}`;
+  elements.detail.innerHTML = `
+    <div class="detail-head status-${className}">
+      <div class="detail-title">
+        <p class="eyebrow">${escapeHtml(formatSourceKind(thread.sourceKind))}</p>
+        <h2 title="${escapeAttribute(title)}">${escapeHtml(title)}</h2>
+        <p class="detail-subline">${escapeHtml(threadSubline(thread))}</p>
+      </div>
+      <span class="status ${className}">${escapeHtml(formatStatus(status))}</span>
+    </div>
+
+    <section class="activity-hero status-${className}">
+      <div class="activity-copy">
+        <span class="section-label">Latest local activity</span>
+        <p>${escapeHtml(thread.latestActivity || "No local activity reported")}</p>
+      </div>
+      <div class="progress-readout">
+        <strong>${escapeHtml(formatTokens(usage))}</strong>
+        <span>tokens observed</span>
+      </div>
+      <div class="progress large"><span style="width: ${thread.freshness?.rawStale ? 35 : 100}%"></span></div>
+    </section>
+
+    <section class="detail-grid" aria-label="Thread detail metrics">
+      <div><span>Source</span><strong>${escapeHtml(formatSourceKind(thread.sourceKind))}</strong></div>
+      <div><span>Project</span><strong>${escapeHtml(thread.projectSlug)}</strong></div>
+      <div><span>Raw Chunks</span><strong>${escapeHtml(thread.rawChunkCount || rawChunks.length || 0)}</strong></div>
+      <div><span>Freshness</span><strong>${escapeHtml(thread.freshness?.rawStale ? "stale" : "fresh")}</strong></div>
+      <div><span>Created</span><strong>${escapeHtml(formatTime(thread.createdAt))}</strong></div>
+      <div><span>Updated</span><strong>${escapeHtml(formatTime(thread.updatedAt))}</strong></div>
+      <div><span>Last Raw</span><strong>${escapeHtml(formatTime(thread.latestRawTelemetryAt))}</strong></div>
+      <div><span>Linked Job</span><strong>${escapeHtml(thread.linkedRunnerJobId || "none")}</strong></div>
+    </section>
+
+    <div class="detail-body">
+      ${linkedRunnerJobBlock(linkedRunnerJob)}
+      ${localActivityBlock(latestActivity)}
+      ${filesBlock(rawChunks)}
+      ${rawTelemetryBlock({
+        latestRawTelemetryAt: thread.latestRawTelemetryAt,
+        rawChunkCount: thread.rawChunkCount,
+        rawPayloadAvailable: rawChunks.length > 0,
+        rawStale: thread.freshness?.rawStale
+      }, rawChunks, "Local Raw Telemetry")}
+    </div>
+  `;
+}
+
+function renderOverviewDetail() {
+  const activeJobs = state.jobs.filter((job) => job.status === "running");
+  const staleJobs = state.jobs.filter((job) => job.rawTelemetry?.rawStale);
+  const staleThreads = state.threads.filter((thread) => thread.freshness?.rawStale);
+  elements.detail.className = "detail";
+  elements.detail.innerHTML = `
+    <div class="detail-head">
+      <div class="detail-title">
+        <p class="eyebrow">Overview</p>
+        <h2>Telemetry Freshness</h2>
+        <p class="detail-subline">Runner jobs and local Codex activity are tracked as separate streams.</p>
+      </div>
+      <span class="status ${staleJobs.length || staleThreads.length ? "stuck" : "completed"}">${escapeHtml(staleJobs.length || staleThreads.length ? "Needs attention" : "Fresh")}</span>
+    </div>
+    <section class="detail-grid" aria-label="Overview metrics">
+      <div><span>Active Jobs</span><strong>${escapeHtml(activeJobs.length)}</strong></div>
+      <div><span>Local Threads</span><strong>${escapeHtml(state.threads.length)}</strong></div>
+      <div><span>Stale Runner Raw</span><strong>${escapeHtml(staleJobs.length)}</strong></div>
+      <div><span>Stale Local Raw</span><strong>${escapeHtml(staleThreads.length)}</strong></div>
+    </section>
+    <div class="detail-body">
+      <section class="block">
+        <div class="block-head">
+          <h3>Recent Mixed Activity</h3>
+          <span>${escapeHtml(state.activity.length || "local")}</span>
+        </div>
+        ${state.activity.length ? eventsView(state.activity.slice(0, 20).map(activityFeedEvent), new Set(), "No activity yet.") : emptyState("No mixed activity", "Runner jobs and local threads will appear after ingest.", { compact: true })}
+      </section>
+    </div>
+  `;
 }
 
 function spendBlock(spend) {
@@ -449,6 +724,128 @@ function historyBlock(history) {
   `;
 }
 
+function rawTelemetryBlock(rawTelemetry, chunks, title = "Raw Telemetry") {
+  const raw = rawTelemetry || {};
+  const count = raw.rawChunkCount ?? chunks.length ?? 0;
+  return `
+    <section class="block raw-block">
+      <div class="block-head">
+        <h3>${escapeHtml(title)}</h3>
+        <span>${escapeHtml(formatRawLine(raw) || "no raw chunks")}</span>
+      </div>
+      <div class="raw-summary">
+        <div><span>Last Raw</span><strong>${escapeHtml(formatTime(raw.latestRawTelemetryAt))}</strong></div>
+        <div><span>Chunks</span><strong>${escapeHtml(count)}</strong></div>
+        <div><span>Status</span><strong>${escapeHtml(raw.rawStatus || (raw.rawStale ? "stale" : "available"))}</strong></div>
+        <div><span>Storage</span><strong>${escapeHtml(chunks.some((chunk) => chunk.storedInR2) ? "R2" : chunks.length ? "D1 fallback" : "none")}</strong></div>
+      </div>
+      ${chunks.length ? `
+        <div class="raw-table" role="table" aria-label="Raw telemetry chunks">
+          <div class="raw-row raw-head" role="row">
+            <span>Seq</span>
+            <span>Generated</span>
+            <span>Bytes</span>
+            <span>Hash</span>
+            <span>Object</span>
+          </div>
+          ${chunks.slice(0, 12).map((chunk) => `
+            <div class="raw-row" role="row">
+              <span>${escapeHtml(chunk.sequence)}</span>
+              <span>${escapeHtml(formatTime(chunk.generatedAt))}</span>
+              <span>${escapeHtml(formatBytes(chunk.byteSize))}</span>
+              <span title="${escapeAttribute(chunk.sha256)}">${escapeHtml((chunk.sha256 || "").slice(0, 12))}</span>
+              <span title="${escapeAttribute(chunk.r2Key || "D1 inline fallback")}">${escapeHtml(chunk.r2Key || "inline")}</span>
+            </div>
+          `).join("")}
+        </div>
+      ` : emptyState("No raw chunks", "Raw telemetry metadata has not arrived yet.", { compact: true })}
+    </section>
+  `;
+}
+
+function linkedRunnerJobBlock(job) {
+  if (!job) {
+    return emptyPanel("Linked Runner Job", "No related remote runner job has been linked to this local thread.");
+  }
+  return `
+    <section class="block">
+      <div class="block-head">
+        <h3>Linked Runner Job</h3>
+        <span>${escapeHtml(formatStatus(job.status))}</span>
+      </div>
+      <div class="linked-job">
+        <strong>${escapeHtml(job.id)}</strong>
+        <span>${escapeHtml(job.currentActivity || "No runner activity reported")}</span>
+        <small>${escapeHtml(formatTime(job.updatedAt))}</small>
+      </div>
+    </section>
+  `;
+}
+
+function localActivityBlock(items) {
+  if (!items.length) {
+    return emptyPanel("Local Activity", "No prompt, message, or command snippets are available for this thread.");
+  }
+  return `
+    <section class="block">
+      <div class="block-head">
+        <h3>Local Activity</h3>
+        <span>${escapeHtml(items.length)}</span>
+      </div>
+      <div class="event-list">
+        ${items.slice().reverse().map((item) => `
+          <div class="event-row severity-info type-${escapeAttribute(item.type)}">
+            <span class="event-rail" aria-hidden="true"></span>
+            <div class="event-main">
+              <div class="event-title-line">
+                <strong>${escapeHtml(formatStatus(item.type))}</strong>
+                <span>local</span>
+              </div>
+              <p title="${escapeAttribute(item.text || "")}">${escapeHtml(item.text || "No detail")}</p>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function filesBlock(chunks) {
+  const files = [];
+  for (const chunk of chunks) {
+    const preview = chunk.inlinePreview || {};
+    for (const file of preview.files || []) {
+      const value = typeof file === "string" ? { path: file } : file;
+      if (value?.path) {
+        files.push({
+          path: value.path,
+          latestAction: value.status || value.latestAction || "observed",
+          readCount: 0,
+          editCount: 0,
+          createCount: 0,
+          deleteCount: 0,
+          patchCount: 0,
+          lastSeenAt: chunk.generatedAt,
+          confidence: "medium",
+          source: "raw"
+        });
+      }
+    }
+  }
+  if (!files.length) {
+    return emptyPanel("Files", "No referenced or changed files were included in the latest local telemetry.");
+  }
+  return `
+    <section class="block">
+      <div class="block-head">
+        <h3>Files</h3>
+        <span>${escapeHtml(files.length)}</span>
+      </div>
+      ${filesView(files.slice(0, 80))}
+    </section>
+  `;
+}
+
 function logBlock(logTail) {
   const log = logTail || "";
   const lineCount = log ? log.split(/\r?\n/).filter(Boolean).length : 0;
@@ -625,6 +1022,41 @@ function formatCost(cost) {
   return formatUsd(cost?.totalOperationalCostUsd ?? cost?.totalEstimatedCostUsd);
 }
 
+function formatSourceKind(value) {
+  if (value === "codex-cli-thread") return "CLI thread";
+  if (value === "codex-ide-thread") return "IDE thread";
+  if (value === "local-workspace") return "Workspace telemetry";
+  if (value === "codespace-worker") return "Codespace worker";
+  if (value === "runner-job") return "Runner job";
+  return formatStatus(value || "local thread");
+}
+
+function formatRawLine(raw) {
+  if (!raw) {
+    return "";
+  }
+  const count = raw.rawChunkCount;
+  const parts = [
+    typeof count === "number" ? `${count} raw` : "",
+    raw.latestRawTelemetryAt ? formatTime(raw.latestRawTelemetryAt) : "",
+    raw.rawStale ? "stale" : ""
+  ].filter(Boolean);
+  return parts.join(" / ");
+}
+
+function formatBytes(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "unknown";
+  }
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB`;
+  }
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function formatUsd(value) {
   return typeof value === "number" && Number.isFinite(value) ? "$" + value.toFixed(value < 0.01 ? 4 : 2) : "unknown";
 }
@@ -737,6 +1169,29 @@ function detailSubline(job) {
     job.updatedAt ? `Updated ${formatTime(job.updatedAt)}` : ""
   ].filter(Boolean);
   return parts.join(" / ") || "No session metadata";
+}
+
+function threadSubline(thread) {
+  const parts = [
+    thread.threadId ? `Thread ${thread.threadId}` : "",
+    thread.latestRawTelemetryAt ? `Raw ${formatTime(thread.latestRawTelemetryAt)}` : "",
+    thread.linkedRunnerJobId ? `Linked ${thread.linkedRunnerJobId}` : ""
+  ].filter(Boolean);
+  return parts.join(" / ") || "No local thread metadata";
+}
+
+function activityFeedEvent(item) {
+  return {
+    id: item.id,
+    type: "status_changed",
+    label: item.label || "Activity",
+    detail: `${item.title || item.id}: ${item.activity || "No activity reported"}`,
+    severity: item.rawChunkCount ? "info" : "warning",
+    status: item.status,
+    confidence: "medium",
+    source: item.type,
+    timestamp: item.updatedAt
+  };
 }
 
 function formatGoalMeta(goal) {

@@ -7,3 +7,8 @@ binding = "DB"
 database_name = "agent-runner-dashboard"
 database_id = "7063d3f6-a76f-46bb-80b3-8825d1126288"
 migrations_dir = "./migrations"
+
+[[r2_buckets]]
+binding = "RAW_TELEMETRY"
+bucket_name = "agent-runner-raw-telemetry"
+preview_bucket_name = "agent-runner-raw-telemetry-dev"
