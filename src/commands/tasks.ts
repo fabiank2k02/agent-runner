@@ -7,7 +7,12 @@ import {
   writeLocalState,
   type TaskState
 } from "../state.js";
-import { startDashboardObserver, type DashboardObserverResult } from "./dashboard.js";
+import {
+  DashboardLaunchError,
+  assertDashboardLaunchConfig,
+  startDashboardObserver,
+  type DashboardObserverResult
+} from "./dashboard.js";
 
 export interface RunTaskResult extends TaskState {
   statusFile: string;
@@ -26,6 +31,7 @@ export function sessionName(projectSlug: string, taskId: string): string {
 
 export async function runTask(context: CommandContext, prompt: string, options: { taskId?: string } = {}): Promise<RunTaskResult> {
   const { config, layout, remote } = context;
+  assertDashboardLaunchConfig(context);
   const taskId = normalizeTaskId(options.taskId ?? createTaskId());
   const session = sessionName(layout.projectSlug, taskId);
   const promptFile = `${layout.remoteProjectLogDir}/${taskId}.prompt.txt`;
@@ -105,10 +111,16 @@ exit "$code"
   const existing = await readLocalState(layout);
   await writeLocalState(layout, stateWithTask(layout, task, existing));
 
-  const dashboardObserver = await startDashboardObserver(context, task).catch((error: unknown): DashboardObserverResult => ({
-    enabled: config.dashboard.enabled,
-    error: error instanceof Error ? error.message : String(error)
-  }));
+  let dashboardObserver: DashboardObserverResult;
+  try {
+    dashboardObserver = await startDashboardObserver(context, task);
+  } catch (error) {
+    await remote.run(`tmux kill-session -t ${shellQuote(session)} 2>/dev/null || true`);
+    if (error instanceof DashboardLaunchError) {
+      throw error;
+    }
+    throw new DashboardLaunchError(error instanceof Error ? error.message : String(error));
+  }
   if (dashboardObserver.enabled) {
     task = {
       ...task,

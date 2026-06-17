@@ -20,6 +20,7 @@ import {
 } from "./commands/tasks.js";
 import { upDevcontainer } from "./commands/up.js";
 import { createCommandContext } from "./context.js";
+import { DashboardLaunchError } from "./commands/dashboard.js";
 
 interface GlobalOptions {
   cwd: string;
@@ -267,6 +268,7 @@ async function startTask(
   options: { taskId?: string; create?: boolean; skipUp?: boolean }
 ): Promise<void> {
   let context = createContext(globals);
+  let createdManagedDroplet = false;
   if (options.create !== false && context.config.digitalOcean.token) {
     const refresh = await refreshManagedDroplet(context.config);
     if (refresh.staleCleared) {
@@ -277,20 +279,29 @@ async function startTask(
 
   if (options.create !== false && !context.config.remote.host) {
     const created = await createDroplet(context.config);
+    createdManagedDroplet = true;
     write(globals, created, formatDropletCreated(created));
     context = createContext(globals);
   }
 
-  const digest = await pushProject(context);
-  write(globals, { digest }, `pushed workspace manifest ${digest}`);
+  try {
+    const digest = await pushProject(context);
+    write(globals, { digest }, `pushed workspace manifest ${digest}`);
 
-  if (!options.skipUp) {
-    await upDevcontainer(context);
-    write(globals, { ok: true }, "remote devcontainer is ready");
+    if (!options.skipUp) {
+      await upDevcontainer(context);
+      write(globals, { ok: true }, "remote devcontainer is ready");
+    }
+
+    const result = await runTask(context, prompt, { taskId: options.taskId });
+    write(globals, result, formatTaskStarted(result));
+  } catch (error) {
+    if (createdManagedDroplet && error instanceof DashboardLaunchError) {
+      const destroyed = await destroyDroplet(context.config, { yes: true });
+      write(globals, destroyed, formatDropletDestroyed(destroyed));
+    }
+    throw error;
   }
-
-  const result = await runTask(context, prompt, { taskId: options.taskId });
-  write(globals, result, formatTaskStarted(result));
 }
 
 async function finishTask(globals: GlobalOptions, options: { keepDroplet?: boolean }): Promise<void> {

@@ -42,7 +42,10 @@ declare const configFileSchema: z.ZodObject<{
         costs: z.ZodDefault<z.ZodObject<{
             digitalOceanHourlyUsd: z.ZodOptional<z.ZodCoercedNumber<unknown>>;
             codexSubscriptionMonthlyUsd: z.ZodOptional<z.ZodCoercedNumber<unknown>>;
+            codexSubscriptionSeatMultiplier: z.ZodOptional<z.ZodCoercedNumber<unknown>>;
             codexSubscriptionMonthlyTokens: z.ZodOptional<z.ZodCoercedNumber<unknown>>;
+            codexWeeklyTokenAllowance: z.ZodOptional<z.ZodCoercedNumber<unknown>>;
+            codexObservedWeeklyTokens: z.ZodOptional<z.ZodCoercedNumber<unknown>>;
         }, z.core.$strip>>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
@@ -94,7 +97,10 @@ export interface ResolvedConfig {
         costs: {
             digitalOceanHourlyUsd?: number;
             codexSubscriptionMonthlyUsd?: number;
+            codexSubscriptionSeatMultiplier?: number;
             codexSubscriptionMonthlyTokens?: number;
+            codexWeeklyTokenAllowance?: number;
+            codexObservedWeeklyTokens?: number;
         };
     };
     configPath: string;

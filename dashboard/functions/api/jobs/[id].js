@@ -16,7 +16,7 @@ export async function onRequestGet({ request, env, params }) {
     `SELECT id, project_slug, task_id, session_name, observer_session_name, remote_host,
       status, exit_code, started_at, finished_at, updated_at, last_seen_at,
       current_activity, is_stuck, progress_percent, progress_confidence,
-      eta_minutes_min, eta_minutes_max, eta_confidence, summary_json, status_json, log_file, log_tail
+      eta_minutes_min, eta_minutes_max, eta_confidence, summary_json, status_json, telemetry_json, log_file, log_tail
      FROM jobs
      WHERE id = ?`
   )
@@ -82,6 +82,7 @@ function mapJobRow(row) {
     etaConfidence: row.eta_confidence,
     summary: parseJson(row.summary_json, {}),
     statusJson: parseJson(row.status_json, {}),
+    telemetry: parseJson(row.telemetry_json, null),
     logFile: row.log_file,
     logTail: row.log_tail
   };

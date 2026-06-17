@@ -65,12 +65,10 @@ export async function doctor(context) {
     });
     checks.push({
         name: "dashboard",
-        ok: !config.dashboard.enabled || Boolean(config.dashboard.endpoint && config.dashboard.token),
-        detail: config.dashboard.enabled
-            ? config.dashboard.endpoint && config.dashboard.token
-                ? `enabled; posting to ${config.dashboard.endpoint}`
-                : `enabled; set AGENT_RUNNER_DASHBOARD_ENDPOINT and ${config.dashboard.tokenEnv}`
-            : "not set; optional"
+        ok: Boolean(config.dashboard.enabled && config.dashboard.endpoint && config.dashboard.token),
+        detail: config.dashboard.enabled && config.dashboard.endpoint && config.dashboard.token
+            ? `enabled; posting to ${config.dashboard.endpoint}`
+            : `required; set AGENT_RUNNER_DASHBOARD_ENDPOINT and ${config.dashboard.tokenEnv}`
     });
     return {
         ok: checks.every((check) => check.ok),

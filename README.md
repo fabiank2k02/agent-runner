@@ -51,7 +51,10 @@ AGENT_RUNNER_DASHBOARD_TOKEN=your-shared-dashboard-token
 AGENT_RUNNER_DASHBOARD_MODEL=gpt-5.4-mini
 AGENT_RUNNER_DASHBOARD_DO_HOURLY_USD=
 AGENT_RUNNER_CODEX_SUBSCRIPTION_USD=
+AGENT_RUNNER_CODEX_SUBSCRIPTION_SEATS=
 AGENT_RUNNER_CODEX_SUBSCRIPTION_TOKENS=
+AGENT_RUNNER_CODEX_WEEKLY_TOKEN_ALLOWANCE=
+AGENT_RUNNER_CODEX_OBSERVED_WEEKLY_TOKENS=
 ```
 
 Then initialize per-project config:
@@ -66,9 +69,11 @@ Password auth uses `sshpass` with the password passed through the `SSHPASS` envi
 
 For managed DigitalOcean droplets, `DIGITALOCEAN_TOKEN` is used only for API calls. The CLI generates a local SSH key under `~/.agent-runner/keys`, uploads the public key to DigitalOcean when needed, and records the active droplet under `~/.agent-runner/digitalocean/<project>.json`. Once that state exists, normal remote commands target the managed droplet even if `.env` still has an old `AGENT_RUNNER_REMOTE_HOST`.
 
-Dashboard reporting is optional and automatic. If `AGENT_RUNNER_DASHBOARD_ENDPOINT` and `AGENT_RUNNER_DASHBOARD_TOKEN` are set, `run` and `start` launch a separate observer tmux session. That observer uses its own `CODEX_HOME`, reads only the task prompt/status/log tail, and posts structured updates to the dashboard endpoint. Set `AGENT_RUNNER_DASHBOARD_MODEL` to a cheap mini model for these summaries. Leave endpoint or token unset to disable it, or set `dashboard.enabled` to `false` in `.agent-runner.json`.
+Dashboard reporting is required for remote task launches. `run` and `start` require `AGENT_RUNNER_DASHBOARD_ENDPOINT`, `AGENT_RUNNER_DASHBOARD_TOKEN`, and resolved `dashboard.enabled: true`. The CLI starts a separate observer tmux session, waits until the dashboard receives an ingest for the new task, then verifies the task appears in `GET /api/jobs`. If that launch gate fails, the remote task session is killed; managed droplets created by `start` are destroyed for dashboard launch failures.
 
-Cost estimates are also optional. Managed DigitalOcean runs record the droplet size's `price_hourly` when available. Override it with `AGENT_RUNNER_DASHBOARD_DO_HOURLY_USD` if needed. Codex subscription cost is estimated as observed task tokens multiplied by `AGENT_RUNNER_CODEX_SUBSCRIPTION_USD / AGENT_RUNNER_CODEX_SUBSCRIPTION_TOKENS`.
+The observer uses its own `CODEX_HOME`, reads only the task prompt/status/log tail, posts a bounded live telemetry snapshot about once per minute, and posts durable observer summaries about every 5 minutes plus terminal states. Live snapshots update the latest `jobs` row with structured events, file activity, goals, token usage, and spend; durable history is inserted only for summaries and terminal states. Set `AGENT_RUNNER_DASHBOARD_MODEL` to a cheap mini model for summary interpretation.
+
+Managed DigitalOcean runs record the droplet size's `price_hourly` when available. Override it with `AGENT_RUNNER_DASHBOARD_DO_HOURLY_USD` if needed. Codex spend is modeled as weekly subscription allocation: monthly subscription price times seat multiplier, divided into a weekly budget, then allocated by task tokens when token data and weekly token allowance are available. If tokens are missing, the dashboard shows a low-confidence runtime allocation instead of an exact token cost.
 
 ## Commands
 
@@ -102,7 +107,7 @@ agent-runner pull
 
 ### Lower-Level Command Notes
 
-`doctor` checks local prerequisites, project config, Codex auth, and whether a DigitalOcean token is available. It does not SSH into a VPS.
+`doctor` checks local prerequisites, project config, Codex auth, required dashboard configuration, and whether a DigitalOcean token is available. It does not SSH into a VPS.
 
 `bootstrap` prepares an already-configured remote host by installing/checking host tools such as Docker, Node/npm, Dev Containers CLI, Codex, `rsync`, and `tmux`. Managed droplets run this automatically during `droplet create`.
 
@@ -195,7 +200,7 @@ agent-runner --json status
 
 ## Dashboard
 
-The first-party Cloudflare Pages dashboard lives in `dashboard/`. It provides token-protected endpoints for consolidated job state:
+The first-party Cloudflare Pages dashboard lives in `dashboard/`. It provides token-protected ingest and Access-or-token-protected read endpoints for consolidated job state:
 
 ```text
 POST /api/ingest
@@ -220,6 +225,8 @@ The dashboard scripts accept either `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_TOKEN`
 The Cloudflare token needs account-level D1 edit and Pages edit permissions. Account Settings read and User Memberships read let Wrangler discover the account automatically.
 
 For the public dashboard, put Cloudflare Access in front of the Pages hostname using Cloudflare as the identity provider, with account-member restriction enabled. Keep `/api/ingest` as a more-specific Access bypass application so runners can post updates with `AGENT_RUNNER_DASHBOARD_TOKEN` without a browser login. Dashboard read APIs can then rely on the Access session instead of a second browser token.
+
+The ingest API remains backward-compatible with payloads containing only `summary`, `status`, and `logTail`. New runners send optional `telemetry` snapshots. Live telemetry updates the `jobs.telemetry_json` field and does not create per-event rows. Summary and terminal telemetry create sparse `summaries` history rows, with raw log tails kept only on the latest job row for debugging.
 
 Local state lives in:
 

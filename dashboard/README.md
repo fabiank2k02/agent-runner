@@ -59,7 +59,14 @@ AGENT_RUNNER_DASHBOARD_TOKEN=your-shared-dashboard-token
 AGENT_RUNNER_DASHBOARD_MODEL=gpt-5.4-mini
 AGENT_RUNNER_DASHBOARD_DO_HOURLY_USD=
 AGENT_RUNNER_CODEX_SUBSCRIPTION_USD=
+AGENT_RUNNER_CODEX_SUBSCRIPTION_SEATS=
 AGENT_RUNNER_CODEX_SUBSCRIPTION_TOKENS=
+AGENT_RUNNER_CODEX_WEEKLY_TOKEN_ALLOWANCE=
+AGENT_RUNNER_CODEX_OBSERVED_WEEKLY_TOKENS=
 ```
 
-When endpoint and token are present, `agent-runner run` and `agent-runner start` launch a second observer tmux session automatically. The observer reads only the prompt, status file, and bounded JSONL log tail, then posts structured progress updates to Pages. Set the dashboard model to a cheaper mini model so progress and ETA summaries do not use the main task model. Cost estimates use managed DigitalOcean hourly pricing when available, plus prorated subscription token cost when the subscription env values are set.
+`agent-runner run` and `agent-runner start` require the endpoint, token, and resolved `dashboard.enabled: true`. A launch is accepted only after the runner starts the observer session, the dashboard receives an ingest for the task, and the task appears in `GET /api/jobs`.
+
+The observer reads only the prompt, status file, and bounded JSONL log tail. It posts a cheap live telemetry snapshot about once per minute, and durable observer summaries about every 5 minutes plus terminal states. Live snapshots update the `jobs` row with structured events, file activity, goals, token usage, and spend. Summary/terminal payloads create sparse history rows. The ingest API still accepts legacy `summary`/`status`/`logTail` payloads.
+
+Codex spend is shown as weekly subscription allocation, not API-price-style token billing. Configure monthly subscription price, optional seat multiplier, and weekly or observed token allowance when available. If task token usage is missing, the UI falls back to low-confidence runtime allocation. DigitalOcean spend remains separate.

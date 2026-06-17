@@ -1,11 +1,27 @@
 import fs from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runTask, sessionName } from "../src/commands/tasks.js";
 import type { CommandContext } from "../src/context.js";
 import { FakeExecutor, FakeRemote, fakeConfig, fakeLayout, tempDir } from "./helpers.js";
 
 describe("tasks", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({
+        jobs: [
+          { id: "sample:task-1" },
+          { id: "sample:task-2" }
+        ]
+      })))
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("starts a deterministic tmux session and records local task state", async () => {
     const projectRoot = await tempDir("task-project");
     const stateRoot = await tempDir("task-state");
@@ -69,6 +85,7 @@ describe("tasks", () => {
     const state = JSON.parse(await fs.promises.readFile(layout.localStateFile, "utf8"));
 
     expect(result.dashboardObserver?.enabled).toBe(true);
+    expect(result.dashboardObserver?.verified).toBe(true);
     expect(result.dashboardObserver?.sessionName).toBe("agent-runner-sample-observer-task-2");
     expect(state.lastTask.dashboardObserverSessionName).toBe("agent-runner-sample-observer-task-2");
     expect(remote.commands.some((command) => command.includes("agent-runner-sample-observer-task-2"))).toBe(true);
@@ -79,12 +96,15 @@ describe("tasks", () => {
     expect(observerScript).toContain("gpt-test-mini");
     expect(observerScript).toContain("maxLogLines");
     expect(observerScript).toContain("digitalOceanHourlyUsd");
+    expect(observerScript).toContain("kind, prompt, status, logTail, summary, durableHistory");
+    expect(observerScript).toContain("extractLiveEvents(logTail");
+    expect(observerScript).toContain("durableHistory");
     expect(observerScript).toContain("--skip-git-repo-check");
     expect(observerScript).toContain("function finalizeSummaryForStatus(summary, status)");
     expect(observerScript).toContain("function expandHome(value)");
     expect(observerScript).toContain('config[key] = expandHome(config[key])');
     expect(observerScript).toContain("fs.mkdirSync(path.dirname(config.summaryFile), { recursive: true })");
-    expect(observerScript).not.toContain("evidence");
+    expect(observerScript).toContain("source: \"prompt|agent_plan|events|summary\"");
   });
 
   it("rejects task ids that would alter remote paths", async () => {

@@ -68,7 +68,10 @@ describe("resolveConfig", () => {
     process.env.AGENT_RUNNER_DASHBOARD_MODEL = "gpt-test-mini";
     process.env.AGENT_RUNNER_DASHBOARD_DO_HOURLY_USD = "0.03571";
     process.env.AGENT_RUNNER_CODEX_SUBSCRIPTION_USD = "200";
+    process.env.AGENT_RUNNER_CODEX_SUBSCRIPTION_SEATS = "5";
     process.env.AGENT_RUNNER_CODEX_SUBSCRIPTION_TOKENS = "100000000";
+    process.env.AGENT_RUNNER_CODEX_WEEKLY_TOKEN_ALLOWANCE = "25000000";
+    process.env.AGENT_RUNNER_CODEX_OBSERVED_WEEKLY_TOKENS = "19000000";
 
     const config = resolveConfig(root);
 
@@ -77,9 +80,13 @@ describe("resolveConfig", () => {
     expect(config.dashboard.token).toBe("dashboard-secret");
     expect(config.dashboard.model).toBe("gpt-test-mini");
     expect(config.dashboard.reasoningEffort).toBe("low");
+    expect(config.dashboard.intervalSeconds).toBe(300);
     expect(config.dashboard.costs.digitalOceanHourlyUsd).toBe(0.03571);
     expect(config.dashboard.costs.codexSubscriptionMonthlyUsd).toBe(200);
+    expect(config.dashboard.costs.codexSubscriptionSeatMultiplier).toBe(5);
     expect(config.dashboard.costs.codexSubscriptionMonthlyTokens).toBe(100000000);
+    expect(config.dashboard.costs.codexWeeklyTokenAllowance).toBe(25000000);
+    expect(config.dashboard.costs.codexObservedWeeklyTokens).toBe(19000000);
   });
 
   it("lets project config disable dashboard reporting even when env is present", async () => {

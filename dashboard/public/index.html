@@ -8,47 +8,63 @@
   </head>
   <body>
     <header class="topbar">
-      <div>
-        <p class="eyebrow">Agent Runner</p>
-        <h1>Active Jobs</h1>
+      <div class="brand-block">
+        <div class="brand-mark" aria-hidden="true">
+          <span></span>
+        </div>
+        <div class="brand-copy">
+          <p class="eyebrow">Agent Runner</p>
+          <h1>Job Control</h1>
+        </div>
       </div>
-      <div class="auth-form">
-        <span class="access-badge">Cloudflare Access</span>
-        <button id="refresh-button" type="button">Refresh</button>
-      </div>
-    </header>
 
-    <main class="shell">
-      <section class="summary-strip" aria-label="Job summary">
-        <div>
+      <section class="top-metrics" aria-label="Job summary">
+        <div class="metric-card metric-running">
           <span class="metric" id="metric-running">0</span>
           <span class="label">Running</span>
         </div>
-        <div>
+        <div class="metric-card metric-stuck">
           <span class="metric" id="metric-stuck">0</span>
           <span class="label">Stuck</span>
         </div>
-        <div>
+        <div class="metric-card metric-completed">
           <span class="metric" id="metric-completed">0</span>
           <span class="label">Completed</span>
         </div>
-        <div>
+        <div class="metric-card metric-failed">
           <span class="metric" id="metric-failed">0</span>
           <span class="label">Failed</span>
         </div>
       </section>
 
+      <div class="top-actions">
+        <span class="access-badge"><span class="access-dot"></span>Access protected</span>
+        <span id="last-updated" class="freshness">Never updated</span>
+        <button id="refresh-button" class="refresh-button" type="button">
+          <span class="refresh-glyph" aria-hidden="true"></span>
+          <span>Refresh</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="shell">
       <section class="workspace">
-        <div class="job-list">
+        <aside class="job-list" aria-label="Jobs">
           <div class="section-head">
-            <h2>Jobs</h2>
-            <span id="last-updated">Never updated</span>
+            <div>
+              <p class="eyebrow">Queue</p>
+              <h2>Jobs</h2>
+            </div>
+            <span id="job-count" class="list-count">0 jobs</span>
           </div>
           <div id="jobs" class="jobs" aria-live="polite"></div>
-        </div>
+        </aside>
 
-        <article class="detail" id="detail">
-          <div class="empty-state">Select a job</div>
+        <article class="detail" id="detail" aria-live="polite">
+          <div class="empty-state">
+            <strong>Select a job</strong>
+            <span>Job details will appear here.</span>
+          </div>
         </article>
       </section>
     </main>

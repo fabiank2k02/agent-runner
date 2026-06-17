@@ -54,7 +54,7 @@ const configFileSchema = z
         enabled: z.boolean().optional(),
         endpoint: z.string().url().optional(),
         tokenEnv: z.string().min(1).default("AGENT_RUNNER_DASHBOARD_TOKEN"),
-        intervalSeconds: z.coerce.number().int().min(15).default(60),
+        intervalSeconds: z.coerce.number().int().min(15).default(300),
         model: z.string().min(1).optional(),
         reasoningEffort: z.string().min(1).default("low"),
         maxLogLines: z.coerce.number().int().min(20).max(1000).default(200),
@@ -62,13 +62,16 @@ const configFileSchema = z
           .object({
             digitalOceanHourlyUsd: z.coerce.number().positive().optional(),
             codexSubscriptionMonthlyUsd: z.coerce.number().positive().optional(),
-            codexSubscriptionMonthlyTokens: z.coerce.number().positive().optional()
+            codexSubscriptionSeatMultiplier: z.coerce.number().positive().optional(),
+            codexSubscriptionMonthlyTokens: z.coerce.number().positive().optional(),
+            codexWeeklyTokenAllowance: z.coerce.number().positive().optional(),
+            codexObservedWeeklyTokens: z.coerce.number().positive().optional()
           })
           .default({})
       })
       .default({
         tokenEnv: "AGENT_RUNNER_DASHBOARD_TOKEN",
-        intervalSeconds: 60,
+        intervalSeconds: 300,
         reasoningEffort: "low",
         maxLogLines: 200,
         costs: {}
@@ -124,7 +127,10 @@ export interface ResolvedConfig {
     costs: {
       digitalOceanHourlyUsd?: number;
       codexSubscriptionMonthlyUsd?: number;
+      codexSubscriptionSeatMultiplier?: number;
       codexSubscriptionMonthlyTokens?: number;
+      codexWeeklyTokenAllowance?: number;
+      codexObservedWeeklyTokens?: number;
     };
   };
   configPath: string;
@@ -231,9 +237,18 @@ export function resolveConfig(projectRootInput = process.cwd()): ResolvedConfig 
         codexSubscriptionMonthlyUsd:
           fileConfig.dashboard.costs.codexSubscriptionMonthlyUsd ??
           numberFromEnv("AGENT_RUNNER_CODEX_SUBSCRIPTION_USD"),
+        codexSubscriptionSeatMultiplier:
+          fileConfig.dashboard.costs.codexSubscriptionSeatMultiplier ??
+          numberFromEnv("AGENT_RUNNER_CODEX_SUBSCRIPTION_SEATS"),
         codexSubscriptionMonthlyTokens:
           fileConfig.dashboard.costs.codexSubscriptionMonthlyTokens ??
-          numberFromEnv("AGENT_RUNNER_CODEX_SUBSCRIPTION_TOKENS")
+          numberFromEnv("AGENT_RUNNER_CODEX_SUBSCRIPTION_TOKENS"),
+        codexWeeklyTokenAllowance:
+          fileConfig.dashboard.costs.codexWeeklyTokenAllowance ??
+          numberFromEnv("AGENT_RUNNER_CODEX_WEEKLY_TOKEN_ALLOWANCE"),
+        codexObservedWeeklyTokens:
+          fileConfig.dashboard.costs.codexObservedWeeklyTokens ??
+          numberFromEnv("AGENT_RUNNER_CODEX_OBSERVED_WEEKLY_TOKENS")
       }
     },
     configPath: path.join(projectRoot, configFileName)
@@ -266,7 +281,7 @@ export function createDefaultConfig(projectRoot: string): AgentRunnerConfigFile 
     },
     dashboard: {
       tokenEnv: "AGENT_RUNNER_DASHBOARD_TOKEN",
-      intervalSeconds: 60,
+      intervalSeconds: 300,
       reasoningEffort: "low",
       maxLogLines: 200,
       costs: {}

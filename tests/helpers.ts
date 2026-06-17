@@ -45,9 +45,11 @@ export function fakeConfig(projectRoot: string): ResolvedConfig {
       hourlyPriceUsd: undefined
     },
     dashboard: {
-      enabled: false,
+      enabled: true,
+      endpoint: "https://dashboard.example.com/api/ingest",
+      token: "dashboard-secret",
       tokenEnv: "AGENT_RUNNER_DASHBOARD_TOKEN",
-      intervalSeconds: 60,
+      intervalSeconds: 300,
       reasoningEffort: "low",
       maxLogLines: 200,
       costs: {}
