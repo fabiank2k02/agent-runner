@@ -19,7 +19,15 @@ import {
   taskStatus
 } from "./commands/tasks.js";
 import {
+  telemetryAutostartInstall,
+  telemetryAutostartStatus,
   telemetryFlush,
+  telemetryProcessOnce,
+  telemetryProcessorRebuild,
+  telemetryProcessorService,
+  telemetryProcessorStart,
+  telemetryProcessorStatus,
+  telemetryProcessorStop,
   telemetryService,
   telemetryStart,
   telemetryStatus,
@@ -49,10 +57,11 @@ export function buildProgram(): Command {
     .command("init")
     .description("Create .agent-runner.json in the current project")
     .option("-f, --force", "overwrite an existing config file")
-    .action(async (options: { force?: boolean }) => {
+    .option("--no-telemetry-autostart", "do not install the devcontainer telemetry startup hook")
+    .action(async (options: { force?: boolean; telemetryAutostart?: boolean }) => {
       const globals = getGlobals(program);
       const result = await initProject(path.resolve(globals.cwd), options);
-      write(globals, result, result.created ? `created ${result.path}` : `${result.path} already exists`);
+      write(globals, result, formatInitResult(result));
     });
 
   program
@@ -199,6 +208,28 @@ export function buildProgram(): Command {
       write(globals, result, result.message);
     });
 
+  const telemetryAutostart = telemetry
+    .command("autostart")
+    .description("Install or inspect devcontainer telemetry autostart");
+
+  telemetryAutostart
+    .command("install")
+    .description("Install the devcontainer postStartCommand hook for local telemetry")
+    .action(async () => {
+      const globals = getGlobals(program);
+      const result = await telemetryAutostartInstall(createContext(globals));
+      write(globals, result, formatTelemetryAutostart(result));
+    });
+
+  telemetryAutostart
+    .command("status")
+    .description("Show whether devcontainer telemetry autostart is installed")
+    .action(async () => {
+      const globals = getGlobals(program);
+      const result = await telemetryAutostartStatus(createContext(globals));
+      write(globals, result, formatTelemetryAutostart(result));
+    });
+
   telemetry
     .command("stop")
     .description("Stop the local telemetry background service")
@@ -224,6 +255,69 @@ export function buildProgram(): Command {
       const globals = getGlobals(program);
       const result = await telemetryFlush(createContext(globals));
       write(globals, result, formatTelemetryFlush(result));
+    });
+
+  telemetry
+    .command("process-once")
+    .description("Process pending raw telemetry into dashboard read models once")
+    .action(async () => {
+      const globals = getGlobals(program);
+      const result = await telemetryProcessOnce(createContext(globals));
+      write(globals, result, formatProcessorRun(result));
+    });
+
+  const processor = telemetry
+    .command("processor")
+    .description("Manage processed telemetry background processing");
+
+  processor
+    .command("start")
+    .description("Start the local processor wake loop")
+    .action(async () => {
+      const globals = getGlobals(program);
+      const result = await telemetryProcessorStart(createContext(globals));
+      write(globals, result, result.message);
+    });
+
+  processor
+    .command("stop")
+    .description("Stop the local processor wake loop")
+    .action(async () => {
+      const globals = getGlobals(program);
+      const result = await telemetryProcessorStop(createContext(globals));
+      write(globals, result, result.message);
+    });
+
+  processor
+    .command("status")
+    .description("Show processor lease, cursor, model mode, and errors")
+    .action(async () => {
+      const globals = getGlobals(program);
+      const result = await telemetryProcessorStatus(createContext(globals));
+      write(globals, result, formatProcessorStatus(result));
+    });
+
+  processor
+    .command("rebuild")
+    .description("Clear processed outputs for a bounded scope and rebuild from raw chunks")
+    .option("--stream-kind <kind>", "rebuild one stream kind, such as runner-job or codex-thread")
+    .option("--stream-id <id>", "rebuild one stream id")
+    .option("--project", "rebuild the current project processed read models", true)
+    .action(async (options: { streamKind?: string; streamId?: string; project?: boolean }) => {
+      const globals = getGlobals(program);
+      const scope =
+        options.streamKind && options.streamId
+          ? { streamKind: options.streamKind, streamId: options.streamId }
+          : { project: Boolean(options.project) };
+      const result = await telemetryProcessorRebuild(createContext(globals), scope);
+      write(globals, result, formatProcessorRun(result));
+    });
+
+  processor
+    .command("service", { hidden: true })
+    .description("Run the local telemetry processor wake loop")
+    .action(async () => {
+      await telemetryProcessorService(createContext(getGlobals(program)));
     });
 
   telemetry
@@ -377,6 +471,14 @@ function write(options: GlobalOptions, value: unknown, text: string): void {
   }
 }
 
+function formatInitResult(result: Awaited<ReturnType<typeof initProject>>): string {
+  const lines = [result.created ? `created ${result.path}` : `${result.path} already exists`];
+  if (result.telemetryAutostart) {
+    lines.push(formatTelemetryAutostart(result.telemetryAutostart));
+  }
+  return lines.join("\n");
+}
+
 function formatDoctor(result: Awaited<ReturnType<typeof doctor>>): string {
   return result.checks
     .map((check) => `${check.ok ? "ok" : "fail"}  ${check.name}: ${check.detail}`)
@@ -444,4 +546,53 @@ function formatTelemetryFlush(result: Awaited<ReturnType<typeof telemetryFlush>>
     `skipped: ${result.skipped}`,
     `state: ${result.statePath}`
   ].join("\n");
+}
+
+function formatTelemetryAutostart(result: Awaited<ReturnType<typeof telemetryAutostartInstall>>): string {
+  if (!result.exists) {
+    return `telemetry autostart skipped: ${result.reason}`;
+  }
+  if (!result.installed) {
+    return `telemetry autostart not installed: ${result.reason}`;
+  }
+  return result.changed
+    ? `telemetry autostart installed in ${result.path}`
+    : `telemetry autostart already installed in ${result.path}`;
+}
+
+function formatProcessorRun(result: Awaited<ReturnType<typeof telemetryProcessOnce>>): string {
+  return [
+    `processor: ${result.status || (result.ok ? "completed" : "blocked")}`,
+    result.runId ? `run: ${result.runId}` : "",
+    result.ownerId ? `owner: ${result.ownerId}` : "",
+    typeof result.streamsUpdated === "number" ? `streams updated: ${result.streamsUpdated}` : "",
+    typeof result.chunksProcessed === "number" ? `chunks processed: ${result.chunksProcessed}` : "",
+    typeof result.memoriesUpdated === "number" ? `memories updated: ${result.memoriesUpdated}` : "",
+    result.lease && typeof result.lease === "object" ? `lease owner: ${(result.lease as { ownerId?: string }).ownerId || "unknown"}` : "",
+    Array.isArray(result.errors) && result.errors.length ? `errors: ${result.errors.join("; ")}` : ""
+  ].filter(Boolean).join("\n");
+}
+
+function formatProcessorStatus(result: Awaited<ReturnType<typeof telemetryProcessorStatus>>): string {
+  const remote = result.remote && typeof result.remote === "object" ? result.remote as Record<string, any> : {};
+  const lease = remote.lease || null;
+  const cursor = remote.cursor || {};
+  const lastRun = remote.lastRun || null;
+  const warnings = Array.isArray(remote.warnings) ? remote.warnings : [];
+  return [
+    `local running: ${result.local.running ? "yes" : "no"}`,
+    result.local.pid ? `local pid: ${result.local.pid}` : "",
+    result.local.lastProcessAt ? `last local process: ${result.local.lastProcessAt}` : "",
+    result.local.lastError ? `local error: ${result.local.lastError}` : "",
+    `lease owner: ${lease?.ownerId || "none"}`,
+    lease?.expiresAt ? `lease expires: ${lease.expiresAt}${lease.expired ? " (expired)" : ""}` : "",
+    `pending streams: ${cursor.pendingStreamCount ?? "unknown"}`,
+    `latest raw sequence: ${cursor.latestRawSequence ?? "unknown"}`,
+    `latest processed sequence: ${cursor.latestProcessedSequence ?? "unknown"}`,
+    `model mode: ${remote.model?.mode || "deterministic-only"}`,
+    lastRun ? `last run: ${lastRun.status} ${lastRun.startedAt}` : "last run: none",
+    lastRun?.errors?.length ? `last errors: ${lastRun.errors.join("; ")}` : "",
+    warnings.length ? `warnings: ${warnings.map((item: any) => item.message || item.kind).join("; ")}` : "",
+    `state: ${result.local.statePath}`
+  ].filter(Boolean).join("\n");
 }

@@ -13,13 +13,21 @@ export async function onRequestGet({ request, env, params }) {
 
   const id = decodeURIComponent(params.id || "");
   const job = await env.DB.prepare(
-    `SELECT id, project_slug, task_id, session_name, observer_session_name, remote_host,
-      status, exit_code, started_at, finished_at, updated_at, last_seen_at,
-      current_activity, is_stuck, progress_percent, progress_confidence,
-      eta_minutes_min, eta_minutes_max, eta_confidence, summary_json, status_json, telemetry_json, log_file, log_tail,
-      last_raw_telemetry_at, raw_chunk_count, raw_payload_available, raw_status
+    `SELECT jobs.id, jobs.project_slug, jobs.task_id, jobs.session_name, jobs.observer_session_name, jobs.remote_host,
+      jobs.status, jobs.exit_code, jobs.started_at, jobs.finished_at, jobs.updated_at, jobs.last_seen_at,
+      jobs.current_activity, jobs.is_stuck, jobs.progress_percent, jobs.progress_confidence,
+      jobs.eta_minutes_min, jobs.eta_minutes_max, jobs.eta_confidence, jobs.summary_json, jobs.status_json, jobs.telemetry_json, jobs.log_file, jobs.log_tail,
+      jobs.last_raw_telemetry_at, jobs.raw_chunk_count, jobs.raw_payload_available, jobs.raw_status,
+      ps.status AS processed_status, ps.summary AS processed_summary, ps.latest_activity AS processed_latest_activity,
+      ps.next_action AS processed_next_action, ps.blocker_json AS processed_blocker_json,
+      ps.files_json AS processed_files_json, ps.token_usage_json AS processed_token_usage_json,
+      ps.cost_json AS processed_cost_json, ps.linked_streams_json AS processed_linked_streams_json,
+      ps.deterministic_version AS deterministic_version, ps.model_version AS model_version,
+      ps.processed_through_sequence AS processed_through_sequence, ps.processed_at AS processed_at,
+      ps.metadata_json AS processed_metadata_json
      FROM jobs
-     WHERE id = ?`
+     LEFT JOIN processed_streams ps ON ps.id = 'runner-job:' || jobs.project_slug || ':' || jobs.task_id
+     WHERE jobs.id = ?`
   )
     .bind(id)
     .first();
@@ -110,7 +118,34 @@ function mapJobRow(row) {
       rawStale: isRawStale(row.status, row.last_raw_telemetry_at, 10 * 60),
       processedAgeSeconds: ageSeconds(row.updated_at),
       processedStale: isProcessedStale(row.status, row.last_raw_telemetry_at, row.updated_at),
-      rawAvailableButUnprocessed: Boolean(row.last_raw_telemetry_at && row.updated_at && Date.parse(row.last_raw_telemetry_at) - Date.parse(row.updated_at) > 10 * 60 * 1000)
+      rawAvailableButUnprocessed: Boolean(row.last_raw_telemetry_at && (!row.processed_at || Date.parse(row.last_raw_telemetry_at) - Date.parse(row.processed_at) > 10 * 60 * 1000))
+    },
+    processed: mapProcessed(row)
+  };
+}
+
+function mapProcessed(row) {
+  if (!row.processed_at) {
+    return null;
+  }
+  return {
+    status: row.processed_status,
+    summary: row.processed_summary,
+    latestActivity: row.processed_latest_activity,
+    nextAction: row.processed_next_action,
+    blockers: parseJson(row.processed_blocker_json, []),
+    files: parseJson(row.processed_files_json, []),
+    tokenUsage: parseJson(row.processed_token_usage_json, {}),
+    cost: parseJson(row.processed_cost_json, {}),
+    linkedStreams: parseJson(row.processed_linked_streams_json, []),
+    deterministicVersion: row.deterministic_version,
+    modelVersion: row.model_version,
+    processedThroughSequence: row.processed_through_sequence || 0,
+    processedAt: row.processed_at,
+    metadata: parseJson(row.processed_metadata_json, {}),
+    freshness: {
+      processedAgeSeconds: ageSeconds(row.processed_at),
+      processedStale: isProcessedStale(row.status, row.last_raw_telemetry_at, row.processed_at)
     }
   };
 }

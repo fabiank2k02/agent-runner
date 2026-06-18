@@ -1,7 +1,17 @@
 import type { CommandContext } from "../context.js";
+import { type DevcontainerTelemetryAutostartResult } from "../devcontainer-autostart.js";
+import { type ProcessorClientResult, type ProcessorServiceStartResult, type ProcessorServiceStopResult, type ProcessorStatusResult } from "../telemetry-processor.js";
 import { type LocalTelemetryFlushResult, type LocalTelemetryStatus, type TelemetryServiceStartResult, type TelemetryServiceStopResult } from "../telemetry.js";
 export declare function telemetryFlush(context: CommandContext): Promise<LocalTelemetryFlushResult>;
 export declare function telemetryStatus(context: CommandContext): Promise<LocalTelemetryStatus>;
 export declare function telemetryStart(context: CommandContext): Promise<TelemetryServiceStartResult>;
+export declare function telemetryAutostartInstall(context: CommandContext): Promise<DevcontainerTelemetryAutostartResult>;
+export declare function telemetryAutostartStatus(context: CommandContext): Promise<DevcontainerTelemetryAutostartResult>;
 export declare function telemetryStop(context: CommandContext): Promise<TelemetryServiceStopResult>;
 export declare function telemetryService(context: CommandContext): Promise<void>;
+export declare function telemetryProcessOnce(context: CommandContext): Promise<ProcessorClientResult>;
+export declare function telemetryProcessorStart(context: CommandContext): Promise<ProcessorServiceStartResult>;
+export declare function telemetryProcessorStop(context: CommandContext): Promise<ProcessorServiceStopResult>;
+export declare function telemetryProcessorStatus(context: CommandContext): Promise<ProcessorStatusResult>;
+export declare function telemetryProcessorRebuild(context: CommandContext, scope: Record<string, unknown>): Promise<ProcessorClientResult>;
+export declare function telemetryProcessorService(context: CommandContext): Promise<void>;

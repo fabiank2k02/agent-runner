@@ -21,4 +21,19 @@ describe("program", () => {
       "--prompt-file"
     );
   });
+
+  it("includes telemetry processor operational commands", () => {
+    const telemetry = buildProgram().commands.find((command) => command.name() === "telemetry");
+    const help = telemetry?.helpInformation() || "";
+    const processor = telemetry?.commands.find((command) => command.name() === "processor");
+    const autostart = telemetry?.commands.find((command) => command.name() === "autostart");
+
+    expect(help).toContain("process-once");
+    expect(help).toContain("processor");
+    expect(help).toContain("autostart");
+    expect(autostart?.helpInformation()).toContain("install");
+    expect(autostart?.helpInformation()).toContain("status");
+    expect(processor?.helpInformation()).toContain("rebuild");
+    expect(processor?.helpInformation()).toContain("status");
+  });
 });

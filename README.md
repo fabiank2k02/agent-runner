@@ -63,7 +63,9 @@ Then initialize per-project config:
 agent-runner init
 ```
 
-This creates `.agent-runner.json`. Environment values provide secrets and host-specific defaults; the project config can override non-secret defaults such as the project slug, remote root, Codex flags, devcontainer flags, and rsync excludes. Codex tasks default to `reasoningEffort: "xhigh"` and `yolo: true`.
+This creates `.agent-runner.json`. If the project already has `.devcontainer/devcontainer.json`, `init` also installs a `postStartCommand` entry that runs `agent-runner telemetry start` whenever the Codespace/devcontainer starts. The hook is idempotent and non-fatal, so it repairs a stopped telemetry service without blocking the container if dashboard credentials are missing. Use `agent-runner init --no-telemetry-autostart` to skip that hook.
+
+Environment values provide secrets and host-specific defaults; the project config can override non-secret defaults such as the project slug, remote root, Codex flags, devcontainer flags, and rsync excludes. Codex tasks default to `reasoningEffort: "xhigh"` and `yolo: true`.
 
 Password auth uses `sshpass` with the password passed through the `SSHPASS` environment variable. The password is not put into command arguments or dry-run output. `doctor` checks for local tools and config only; it does not attempt to log into the VPS.
 
@@ -206,6 +208,11 @@ The first-party Cloudflare Pages dashboard lives in `dashboard/`. It provides to
 POST /api/ingest
 GET  /api/jobs
 GET  /api/jobs/:id
+GET  /api/threads
+GET  /api/processed-streams
+GET  /api/memory
+GET  /api/processor
+POST /api/processor
 ```
 
 Deploy setup:
@@ -227,6 +234,21 @@ The Cloudflare token needs account-level D1 edit and Pages edit permissions. Acc
 For the public dashboard, put Cloudflare Access in front of the Pages hostname using Cloudflare as the identity provider, with account-member restriction enabled. Keep `/api/ingest` as a more-specific Access bypass application so runners can post updates with `AGENT_RUNNER_DASHBOARD_TOKEN` without a browser login. Dashboard read APIs can then rely on the Access session instead of a second browser token.
 
 The ingest API remains backward-compatible with payloads containing only `summary`, `status`, and `logTail`. New runners send optional `telemetry` snapshots. Live telemetry updates the `jobs.telemetry_json` field and does not create per-event rows. Summary and terminal telemetry create sparse `summaries` history rows, with raw log tails kept only on the latest job row for debugging.
+
+Raw telemetry is still the source of truth. The dashboard also has a disposable processing layer that writes derived summaries, processor status, account usage snapshots, and project memory into additive D1 tables. Raw ingest wakes deterministic processing automatically with conservative stream, chunk, R2 byte, and runtime budgets. Local controls are available for inspection and repair:
+
+```bash
+agent-runner telemetry autostart install
+agent-runner telemetry autostart status
+agent-runner telemetry process-once
+agent-runner telemetry processor start
+agent-runner telemetry processor status
+agent-runner telemetry processor rebuild --project
+```
+
+`telemetry autostart install` adds or repairs the devcontainer startup hook for an existing repo. It preserves existing `postStartCommand` entries by converting them into a named command object when needed. Global npm install cannot safely mutate arbitrary repos by itself, so `agent-runner init` is the per-repo automation point.
+
+Model-backed processing is isolated from Cloudflare Workers and disabled by default; deterministic processing does not require OpenAI API billing.
 
 Local state lives in:
 

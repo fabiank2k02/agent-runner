@@ -5,6 +5,10 @@ const state = {
   jobs: [],
   threads: [],
   activity: [],
+  processedStreams: [],
+  memories: [],
+  processorStatus: null,
+  selectedMemoryId: null,
   selectedId: null,
   selectedThreadId: null,
   detailJob: null,
@@ -70,14 +74,25 @@ async function loadDashboard(options = {}) {
   }
 
   try {
-    const [jobsResponse, threadsResponse, activityResponse] = await Promise.all([
+    const [jobsResponse, threadsResponse, activityResponse, processedResponse, memoryResponse] = await Promise.all([
       api("/api/jobs"),
       api("/api/threads").catch(() => ({ threads: [] })),
-      api("/api/activity").catch(() => ({ activity: [] }))
+      api("/api/activity").catch(() => ({ activity: [] })),
+      api("/api/processed-streams").catch(() => ({ streams: [] })),
+      api("/api/memory").catch(() => ({ memories: [] }))
     ]);
     state.jobs = jobsResponse.jobs || [];
     state.threads = threadsResponse.threads || [];
     state.activity = activityResponse.activity || [];
+    state.processedStreams = processedResponse.streams || [];
+    state.memories = memoryResponse.memories || [];
+    if (!state.memories.some((memory) => memory.id === state.selectedMemoryId)) {
+      state.selectedMemoryId = state.memories[0]?.id || null;
+    }
+    const projectSlug = currentProjectSlug();
+    state.processorStatus = projectSlug
+      ? await api("/api/processor?projectSlug=" + encodeURIComponent(projectSlug)).catch(() => null)
+      : null;
     if (!state.jobs.some((job) => job.id === state.selectedId)) {
       state.selectedId = state.jobs[0]?.id || null;
       state.detailJob = null;
@@ -162,6 +177,10 @@ function render() {
   renderMetrics();
   if (state.view === "threads") {
     renderThreads();
+  } else if (state.view === "memory") {
+    renderMemory();
+  } else if (state.view === "processor") {
+    renderProcessor();
   } else if (state.view === "overview") {
     renderOverview();
   } else {
@@ -176,6 +195,10 @@ function render() {
     elements.detail.innerHTML = state.loading ? detailSkeleton() : emptyState("No local threads", "Local Codex telemetry will appear after the local service uploads.");
   } else if (state.view === "overview") {
     renderOverviewDetail();
+  } else if (state.view === "memory") {
+    renderMemoryDetail();
+  } else if (state.view === "processor") {
+    renderProcessorDetail();
   }
 }
 
@@ -225,7 +248,7 @@ function renderJobs() {
     const percent = progressPercent(job);
     const status = job.isStuck ? "stuck" : job.status || "unknown";
     const className = statusClass(status);
-    const activity = telemetry?.currentActivity || job.summary?.currentActivity || job.currentActivity || "No activity reported";
+    const activity = job.processed?.latestActivity || telemetry?.currentActivity || job.summary?.currentActivity || job.currentActivity || "No activity reported";
     const eventCount = telemetry?.events?.length || 0;
     return `
       <button class="job-row status-${className} ${job.id === state.selectedId ? "active" : ""}" data-job-id="${escapeAttribute(job.id)}">
@@ -247,7 +270,7 @@ function renderJobs() {
         </span>
         <span class="job-telemetry-line">
           <span>${escapeHtml(eventCount ? `${eventCount} events` : "no events")}</span>
-          <span>${escapeHtml(formatRawLine(job.rawTelemetry) || formatSpendSource(telemetry?.spend || job.summary?.cost))}</span>
+          <span>${escapeHtml(formatProcessedLine(job.processed) || formatRawLine(job.rawTelemetry) || formatSpendSource(telemetry?.spend || job.summary?.cost))}</span>
         </span>
       </button>
     `;
@@ -274,6 +297,7 @@ function renderThreads() {
     const status = thread.status || "unknown";
     const className = statusClass(status);
     const title = thread.title || thread.threadId;
+    const activity = thread.processed?.latestActivity || thread.latestActivity || "No local activity reported";
     return `
       <button class="job-row thread-row status-${className} ${thread.id === state.selectedThreadId ? "active" : ""}" data-thread-id="${escapeAttribute(thread.id)}">
         <span class="job-row-main">
@@ -287,10 +311,10 @@ function renderThreads() {
           <span class="task-id" title="${escapeAttribute(title)}">${escapeHtml(title)}</span>
           <span class="time">${escapeHtml(formatTime(thread.updatedAt))}</span>
         </span>
-        <span class="activity" title="${escapeAttribute(thread.latestActivity || "")}">${escapeHtml(thread.latestActivity || "No local activity reported")}</span>
+        <span class="activity" title="${escapeAttribute(activity)}">${escapeHtml(activity)}</span>
         <span class="job-telemetry-line">
           <span>${escapeHtml(formatStatus(status))}</span>
-          <span>${escapeHtml(formatRawLine({ rawChunkCount: thread.rawChunkCount, latestRawTelemetryAt: thread.latestRawTelemetryAt, rawStale: thread.freshness?.rawStale }))}</span>
+          <span>${escapeHtml(formatProcessedLine(thread.processed) || formatRawLine({ rawChunkCount: thread.rawChunkCount, latestRawTelemetryAt: thread.latestRawTelemetryAt, rawStale: thread.freshness?.rawStale }))}</span>
         </span>
       </button>
     `;
@@ -367,13 +391,92 @@ function renderOverview() {
   }
 }
 
+function renderMemory() {
+  elements.listEyebrow.textContent = "Project";
+  elements.listTitle.textContent = "Memory";
+  elements.jobCount.textContent = `${state.memories.length} ${state.memories.length === 1 ? "item" : "items"}`;
+  if (!state.memories.length) {
+    elements.jobs.innerHTML = emptyState("No project memory", "Durable facts will appear after repeated or explicit evidence is processed.", { compact: true });
+    return;
+  }
+  elements.jobs.innerHTML = state.memories.map((memory) => `
+    <button class="job-row memory-row ${memory.id === state.selectedMemoryId ? "active" : ""}" data-memory-id="${escapeAttribute(memory.id)}">
+      <span class="job-row-main">
+        <span class="row-leading">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span class="project">${escapeHtml(formatStatus(memory.memoryKind))}</span>
+        </span>
+        <span class="entity-pill">${escapeHtml(memory.evidenceStrength || "observed")}</span>
+      </span>
+      <span class="job-meta-line">
+        <span class="task-id" title="${escapeAttribute(memory.title)}">${escapeHtml(memory.title)}</span>
+        <span class="time">${escapeHtml(formatTime(memory.updatedAt))}</span>
+      </span>
+      <span class="activity" title="${escapeAttribute(memory.body)}">${escapeHtml(memory.body)}</span>
+      <span class="job-telemetry-line">
+        <span>${escapeHtml(memory.modelConfidence ? `${memory.modelConfidence} model confidence` : "evidence based")}</span>
+        <span>${escapeHtml(`${memory.evidence?.length || 0} evidence`)}</span>
+      </span>
+    </button>
+  `).join("");
+  for (const row of elements.jobs.querySelectorAll("[data-memory-id]")) {
+    row.addEventListener("click", () => {
+      state.selectedMemoryId = row.dataset.memoryId;
+      render();
+    });
+  }
+}
+
+function renderProcessor() {
+  const status = state.processorStatus || {};
+  const cursor = status.cursor || {};
+  const warnings = Array.isArray(status.warnings) ? status.warnings : [];
+  elements.listEyebrow.textContent = "Processing";
+  elements.listTitle.textContent = "Status";
+  elements.jobCount.textContent = status.projectSlug || "current project";
+  elements.jobs.innerHTML = `
+    <button class="job-row active">
+      <span class="job-row-main">
+        <span class="row-leading">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span class="project">Automatic</span>
+        </span>
+        <span class="entity-pill">${escapeHtml(status.automatic?.paused ? "paused" : "enabled")}</span>
+      </span>
+      <span class="activity">${escapeHtml(status.automatic?.mode || "wake on ingest or local loop")}</span>
+    </button>
+    <button class="job-row">
+      <span class="job-row-main">
+        <span class="row-leading">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span class="project">Cursor</span>
+        </span>
+        <span class="entity-pill">${escapeHtml(`${cursor.pendingStreamCount ?? 0} pending`)}</span>
+      </span>
+      <span class="activity">${escapeHtml(`raw ${cursor.latestRawSequence ?? "n/a"} / processed ${cursor.latestProcessedSequence ?? "n/a"}`)}</span>
+    </button>
+    ${warnings.map((warning) => `
+      <button class="job-row status-stuck">
+        <span class="job-row-main">
+          <span class="row-leading">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span class="project">${escapeHtml(formatStatus(warning.kind))}</span>
+          </span>
+          <span class="status stuck">${escapeHtml(warning.severity || "warning")}</span>
+        </span>
+        <span class="activity">${escapeHtml(warning.message || "")}</span>
+      </button>
+    `).join("")}
+  `;
+}
+
 function renderDetail(job, history, rawChunks = []) {
   const summary = job.summary || {};
   const telemetry = normalizedTelemetry(job);
   const status = job.isStuck ? "stuck" : job.status || "unknown";
   const className = statusClass(status);
   const percent = progressPercent(job);
-  const activity = telemetry?.currentActivity || summary.currentActivity || job.currentActivity || "No activity reported";
+  const activity = job.processed?.latestActivity || telemetry?.currentActivity || summary.currentActivity || job.currentActivity || "No activity reported";
   const events = telemetry?.events || [];
   const files = telemetry?.files?.length ? telemetry.files : aggregateFilesFromEvents(events);
   const spend = telemetry?.spend || summary.cost || {};
@@ -416,6 +519,7 @@ function renderDetail(job, history, rawChunks = []) {
     </section>
 
     <div class="detail-body">
+      ${processedBlock(job.processed)}
       ${spendBlock(spend)}
       ${rawTelemetryBlock(job.rawTelemetry, rawChunks, "Runner Raw Telemetry")}
       ${goalsBlock(goals, subgoals, percent)}
@@ -438,7 +542,8 @@ function renderThreadDetail(thread, rawChunks, latestActivity, linkedRunnerJob) 
   const status = thread.status || "unknown";
   const className = statusClass(status);
   const title = thread.title || thread.threadId;
-  const usage = thread.tokenUsage || {};
+  const usage = thread.processed?.tokenUsage || thread.tokenUsage || {};
+  const activity = thread.processed?.latestActivity || thread.latestActivity || "No local activity reported";
   elements.detail.className = `detail status-${className}`;
   elements.detail.innerHTML = `
     <div class="detail-head status-${className}">
@@ -453,7 +558,7 @@ function renderThreadDetail(thread, rawChunks, latestActivity, linkedRunnerJob) 
     <section class="activity-hero status-${className}">
       <div class="activity-copy">
         <span class="section-label">Latest local activity</span>
-        <p>${escapeHtml(thread.latestActivity || "No local activity reported")}</p>
+        <p>${escapeHtml(activity)}</p>
       </div>
       <div class="progress-readout">
         <strong>${escapeHtml(formatTokens(usage))}</strong>
@@ -474,6 +579,7 @@ function renderThreadDetail(thread, rawChunks, latestActivity, linkedRunnerJob) 
     </section>
 
     <div class="detail-body">
+      ${processedBlock(thread.processed)}
       ${linkedRunnerJobBlock(linkedRunnerJob)}
       ${localActivityBlock(latestActivity)}
       ${filesBlock(rawChunks)}
@@ -491,6 +597,10 @@ function renderOverviewDetail() {
   const activeJobs = state.jobs.filter((job) => job.status === "running");
   const staleJobs = state.jobs.filter((job) => job.rawTelemetry?.rawStale);
   const staleThreads = state.threads.filter((thread) => thread.freshness?.rawStale);
+  const staleProcessed = [
+    ...state.jobs.filter((job) => job.processed?.freshness?.processedStale || job.rawTelemetry?.rawAvailableButUnprocessed),
+    ...state.threads.filter((thread) => thread.freshness?.processedStale)
+  ];
   elements.detail.className = "detail";
   elements.detail.innerHTML = `
     <div class="detail-head">
@@ -506,8 +616,15 @@ function renderOverviewDetail() {
       <div><span>Local Threads</span><strong>${escapeHtml(state.threads.length)}</strong></div>
       <div><span>Stale Runner Raw</span><strong>${escapeHtml(staleJobs.length)}</strong></div>
       <div><span>Stale Local Raw</span><strong>${escapeHtml(staleThreads.length)}</strong></div>
+      <div><span>Processed Streams</span><strong>${escapeHtml(state.processedStreams.length)}</strong></div>
+      <div><span>Processed Behind</span><strong>${escapeHtml(staleProcessed.length)}</strong></div>
+      <div><span>Memory Items</span><strong>${escapeHtml(state.memories.length)}</strong></div>
+      <div><span>Processor</span><strong>${escapeHtml(state.processorStatus?.automatic?.paused ? "paused" : "automatic")}</strong></div>
     </section>
     <div class="detail-body">
+      ${accountUsageBlock(state.processorStatus?.accountUsage)}
+      ${processorStatusBlock(state.processorStatus)}
+      ${memorySummaryBlock(state.memories)}
       <section class="block">
         <div class="block-head">
           <h3>Recent Mixed Activity</h3>
@@ -515,6 +632,81 @@ function renderOverviewDetail() {
         </div>
         ${state.activity.length ? eventsView(state.activity.slice(0, 20).map(activityFeedEvent), new Set(), "No activity yet.") : emptyState("No mixed activity", "Runner jobs and local threads will appear after ingest.", { compact: true })}
       </section>
+    </div>
+  `;
+}
+
+function renderMemoryDetail() {
+  const memory = state.memories.find((item) => item.id === state.selectedMemoryId) || state.memories[0];
+  elements.detail.className = "detail";
+  if (!memory) {
+    elements.detail.innerHTML = emptyState("No project memory", "Durable facts will appear after processing has enough evidence.");
+    return;
+  }
+  elements.detail.innerHTML = `
+    <div class="detail-head">
+      <div class="detail-title">
+        <p class="eyebrow">${escapeHtml(formatStatus(memory.memoryKind))}</p>
+        <h2 title="${escapeAttribute(memory.title)}">${escapeHtml(memory.title)}</h2>
+        <p class="detail-subline">${escapeHtml(memory.modelConfidence ? `${memory.modelConfidence} model confidence` : `${memory.evidenceStrength || "observed"} evidence`)}</p>
+      </div>
+      <span class="status ${memory.supersededBy ? "stopped" : "completed"}">${escapeHtml(memory.supersededBy ? "Superseded" : "Active")}</span>
+    </div>
+    <section class="activity-hero">
+      <div class="activity-copy">
+        <span class="section-label">Memory</span>
+        <p>${escapeHtml(memory.body)}</p>
+      </div>
+      <div class="progress-readout">
+        <strong>${escapeHtml(memory.evidence?.length || 0)}</strong>
+        <span>evidence pointers</span>
+      </div>
+      <div class="progress large"><span style="width: ${memory.supersededBy ? 45 : 100}%"></span></div>
+    </section>
+    <div class="detail-body">
+      <section class="block">
+        <div class="block-head">
+          <h3>Evidence</h3>
+          <span>${escapeHtml(memory.evidenceStrength || "observed")}</span>
+        </div>
+        ${memory.evidence?.length ? eventsView(memory.evidence.map(memoryEvidenceEvent), new Set(), "No evidence pointers.") : emptyState("No evidence", "This memory item has no stored evidence pointers.", { compact: true })}
+      </section>
+    </div>
+  `;
+}
+
+function renderProcessorDetail() {
+  const status = state.processorStatus;
+  elements.detail.className = "detail";
+  if (!status) {
+    elements.detail.innerHTML = emptyState("No processor status", "Processor status will appear after dashboard processing is configured.");
+    return;
+  }
+  const cursor = status.cursor || {};
+  const lease = status.lease || {};
+  const lastRun = status.lastRun || {};
+  elements.detail.innerHTML = `
+    <div class="detail-head">
+      <div class="detail-title">
+        <p class="eyebrow">Processor Status</p>
+        <h2>${escapeHtml(status.projectSlug || "Project")}</h2>
+        <p class="detail-subline">${escapeHtml(status.automatic?.mode || "wake on ingest or local loop")}</p>
+      </div>
+      <span class="status ${lease.expired || !lease.ownerId ? "unknown" : "running"}">${escapeHtml(lease.ownerId ? "Lease observed" : "No active lease")}</span>
+    </div>
+    <section class="detail-grid" aria-label="Processor metrics">
+      <div><span>Pending Streams</span><strong>${escapeHtml(cursor.pendingStreamCount ?? "unknown")}</strong></div>
+      <div><span>Raw Cursor</span><strong>${escapeHtml(cursor.latestRawSequence ?? "unknown")}</strong></div>
+      <div><span>Processed Cursor</span><strong>${escapeHtml(cursor.latestProcessedSequence ?? "unknown")}</strong></div>
+      <div><span>Model Mode</span><strong>${escapeHtml(status.model?.mode || "deterministic-only")}</strong></div>
+      <div><span>Lease Owner</span><strong>${escapeHtml(lease.ownerId || "none")}</strong></div>
+      <div><span>Lease Expiry</span><strong>${escapeHtml(formatTime(lease.expiresAt))}</strong></div>
+      <div><span>Last Run</span><strong>${escapeHtml(lastRun.status || "none")}</strong></div>
+      <div><span>Last Error</span><strong>${escapeHtml(lastRun.errors?.[0] || "none")}</strong></div>
+    </section>
+    <div class="detail-body">
+      ${accountUsageBlock(status.accountUsage)}
+      ${processorStatusBlock(status)}
     </div>
   `;
 }
@@ -551,6 +743,121 @@ function spendBlock(spend) {
           <strong>${escapeHtml(formatUsd(total))}</strong>
           <small>${escapeHtml(formatRemaining(spend))}</small>
         </div>
+      </div>
+    </section>
+  `;
+}
+
+function processedBlock(processed) {
+  if (!processed) {
+    return emptyPanel("Processed Summary", "No processed read model has been built for this stream yet.");
+  }
+  const blockers = Array.isArray(processed.blockers) ? processed.blockers : [];
+  const files = Array.isArray(processed.files) ? processed.files : [];
+  return `
+    <section class="block processed-block">
+      <div class="block-head">
+        <h3>Processed Summary</h3>
+        <span>${escapeHtml(`through ${processed.processedThroughSequence || 0}`)}</span>
+      </div>
+      <div class="processed-summary">
+        <p>${escapeHtml(processed.summary || "No processed summary available.")}</p>
+        ${processed.nextAction ? `<strong>${escapeHtml(processed.nextAction)}</strong>` : ""}
+        <small>${escapeHtml(`Calculated ${formatTime(processed.processedAt)} / ${processed.deterministicVersion || "deterministic"}`)}</small>
+      </div>
+      <div class="raw-summary">
+        <div><span>Status</span><strong>${escapeHtml(formatStatus(processed.status))}</strong></div>
+        <div><span>Blockers</span><strong>${escapeHtml(blockers.length)}</strong></div>
+        <div><span>Files</span><strong>${escapeHtml(files.length)}</strong></div>
+        <div><span>Tokens</span><strong>${escapeHtml(formatTokens(processed.tokenUsage))}</strong></div>
+      </div>
+      ${blockers.length ? eventsView(blockers.slice(-6).map(blockerEvent), new Set(), "No blocker signals extracted.") : ""}
+    </section>
+  `;
+}
+
+function accountUsageBlock(usage) {
+  const latest = usage?.latest;
+  if (!latest) {
+    return emptyPanel("Account Usage And Limits", "No Codex account status snapshot has arrived yet.");
+  }
+  const weekly = latest.weeklyRemaining || {};
+  const rolling = latest.rolling5hRemaining || {};
+  return `
+    <section class="block usage-block">
+      <div class="block-head">
+        <h3>Account Usage And Limits</h3>
+        <span>${escapeHtml(usage.label || "observed/estimated")}</span>
+      </div>
+      <div class="usage-grid">
+        <div>
+          <span>Weekly Remaining</span>
+          <strong>${escapeHtml(formatLimitRemaining(weekly))}</strong>
+          <small>${escapeHtml(formatReset(latest.reset?.weeklyResetAt))}</small>
+        </div>
+        <div>
+          <span>5-hour Remaining</span>
+          <strong>${escapeHtml(formatLimitRemaining(rolling))}</strong>
+          <small>${escapeHtml(formatReset(latest.reset?.rolling5hResetAt))}</small>
+        </div>
+        <div>
+          <span>Last Hour Tokens</span>
+          <strong>${escapeHtml(formatNumber(usage.tokensLastHour))}</strong>
+          <small>${escapeHtml(`${formatNumber(usage.tokenBurnRatePerHour)} / hour`)}</small>
+        </div>
+        <div>
+          <span>Today / Week</span>
+          <strong>${escapeHtml(`${formatNumber(usage.tokensToday)} / ${formatNumber(usage.tokensThisWeek)}`)}</strong>
+          <small>${escapeHtml(formatLimitEta(usage.estimatedHoursUntilLimit))}</small>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function processorStatusBlock(status) {
+  if (!status) {
+    return emptyPanel("Processor Status", "No processor status has been reported.");
+  }
+  const cursor = status.cursor || {};
+  const lastRun = status.lastRun || {};
+  const warnings = Array.isArray(status.warnings) ? status.warnings : [];
+  return `
+    <section class="block processor-block">
+      <div class="block-head">
+        <h3>Processor Status</h3>
+        <span>${escapeHtml(status.automatic?.paused ? "paused" : "automatic")}</span>
+      </div>
+      <div class="raw-summary">
+        <div><span>Pending</span><strong>${escapeHtml(cursor.pendingStreamCount ?? "unknown")}</strong></div>
+        <div><span>Behind</span><strong>${escapeHtml(cursor.behindBySequence ?? "unknown")}</strong></div>
+        <div><span>Last Run</span><strong>${escapeHtml(lastRun.status || "none")}</strong></div>
+        <div><span>Model</span><strong>${escapeHtml(status.model?.mode || "deterministic-only")}</strong></div>
+      </div>
+      ${warnings.length ? eventsView(warnings.map(warningEvent), new Set(), "No processor warnings.") : ""}
+    </section>
+  `;
+}
+
+function memorySummaryBlock(memories) {
+  const active = memories.filter((memory) => !memory.supersededBy);
+  if (!active.length) {
+    return emptyPanel("Project Memory", "No active memory items have been extracted yet.");
+  }
+  return `
+    <section class="block memory-block">
+      <div class="block-head">
+        <h3>Project Memory</h3>
+        <span>${escapeHtml(`${active.length} active`)}</span>
+      </div>
+      <div class="memory-list">
+        ${active.slice(0, 6).map((memory) => `
+          <div class="memory-card">
+            <strong title="${escapeAttribute(memory.title)}">${escapeHtml(memory.title)}</strong>
+            <p title="${escapeAttribute(memory.body)}">${escapeHtml(memory.body)}</p>
+            <span>${escapeHtml(memory.modelConfidence ? `${memory.modelConfidence} model confidence` : `${memory.evidenceStrength || "observed"} evidence`)}</span>
+          </div>
+        `).join("")}
       </div>
     </section>
   `;
@@ -668,7 +975,7 @@ function eventRow(event, isNew) {
         ${detail ? `<p title="${escapeAttribute(detail)}">${escapeHtml(detail)}</p>` : ""}
         <div class="event-meta">
           <span>${escapeHtml(formatEventType(event.type))}</span>
-          <span>${escapeHtml(event.confidence || "low")} confidence</span>
+          <span>${escapeHtml(formatEvidenceLabel(event.confidence))}</span>
           ${event.inferred ? "<span>inferred</span>" : ""}
         </div>
       </div>
@@ -693,7 +1000,7 @@ function filesView(files) {
           <span class="file-path" title="${escapeAttribute(file.path)}">${escapeHtml(file.path)}</span>
           <span>${escapeHtml(formatFileAction(file.latestAction))}</span>
           <span>${escapeHtml(formatFileCounts(file))}</span>
-          <span title="${escapeAttribute(file.source || "")}">${escapeHtml(formatTime(file.lastSeenAt))} / ${escapeHtml(file.confidence || "low")}</span>
+          <span title="${escapeAttribute(file.source || "")}">${escapeHtml(formatTime(file.lastSeenAt))} / ${escapeHtml(formatEvidenceLabel(file.confidence || (file.source === "raw" ? "observed" : "low")))}</span>
         </div>
       `).join("")}
     </div>
@@ -826,7 +1133,7 @@ function filesBlock(chunks) {
           deleteCount: 0,
           patchCount: 0,
           lastSeenAt: chunk.generatedAt,
-          confidence: "medium",
+          confidence: "observed",
           source: "raw"
         });
       }
@@ -1185,17 +1492,100 @@ function activityFeedEvent(item) {
     id: item.id,
     type: "status_changed",
     label: item.label || "Activity",
-    detail: `${item.title || item.id}: ${item.activity || "No activity reported"}`,
+    detail: `${item.title || item.id}: ${item.processedSummary || item.activity || "No activity reported"}`,
     severity: item.rawChunkCount ? "info" : "warning",
     status: item.status,
-    confidence: "medium",
+    confidence: item.processedAt ? "observed" : "medium",
     source: item.type,
     timestamp: item.updatedAt
   };
 }
 
+function blockerEvent(blocker) {
+  return {
+    id: `${blocker.kind || "blocker"}:${blocker.observedAt || ""}:${blocker.message || ""}`,
+    type: "error",
+    label: formatStatus(blocker.kind || "Blocker"),
+    detail: blocker.message || "Blocker signal extracted.",
+    severity: "warning",
+    confidence: "observed",
+    source: blocker.source || "deterministic",
+    timestamp: blocker.observedAt
+  };
+}
+
+function warningEvent(warning) {
+  return {
+    id: warning.kind || warning.message,
+    type: "status_changed",
+    label: formatStatus(warning.kind || "Warning"),
+    detail: warning.message || "",
+    severity: warning.severity || "warning",
+    confidence: "observed",
+    source: "processor",
+    timestamp: new Date().toISOString()
+  };
+}
+
+function memoryEvidenceEvent(evidence) {
+  return {
+    id: `${evidence.sourceStreamId || ""}:${evidence.chunkId || ""}:${evidence.sequence || ""}`,
+    type: "status_changed",
+    label: evidence.sourceStreamId || "Evidence",
+    detail: evidence.chunkId ? `Chunk ${evidence.chunkId}` : `Sequence ${evidence.sequence || "unknown"}`,
+    severity: "info",
+    confidence: evidence.evidenceStrength || "observed",
+    source: "memory",
+    timestamp: evidence.timestamp
+  };
+}
+
 function formatGoalMeta(goal) {
   return [formatStatus(goal.state), `${goal.confidence || "low"} confidence`, goal.source || ""].filter(Boolean).join(" / ");
+}
+
+function formatEvidenceLabel(value) {
+  return ["observed", "calculated", "extracted", "estimated"].includes(value) ? value : `${value || "low"} confidence`;
+}
+
+function formatProcessedLine(processed) {
+  if (!processed?.processedAt) {
+    return "";
+  }
+  const parts = [
+    `processed ${formatTime(processed.processedAt)}`,
+    processed.freshness?.processedStale ? "behind" : "",
+    processed.modelVersion ? "model" : "deterministic"
+  ].filter(Boolean);
+  return parts.join(" / ");
+}
+
+function formatLimitRemaining(value) {
+  if (!value || typeof value !== "object") {
+    return "unknown";
+  }
+  const percent = value.percentRemaining;
+  if (typeof percent === "number" && Number.isFinite(percent)) {
+    return `${percent.toFixed(percent < 10 ? 1 : 0)}%`;
+  }
+  const remaining = value.remainingTokens ?? value.remaining;
+  return typeof remaining === "number" ? formatNumber(remaining) : "unknown";
+}
+
+function formatReset(value) {
+  return value ? `resets ${formatTime(value)}` : "reset unknown";
+}
+
+function formatLimitEta(value) {
+  return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(value < 10 ? 1 : 0)}h until limit` : "limit ETA unknown";
+}
+
+function formatNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? new Intl.NumberFormat().format(Math.round(value)) : "unknown";
+}
+
+function currentProjectSlug() {
+  return state.jobs[0]?.projectSlug || state.threads[0]?.projectSlug || state.processedStreams[0]?.projectSlug || state.memories[0]?.projectSlug || "";
 }
 
 function formatEventType(value) {

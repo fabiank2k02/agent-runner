@@ -17,5 +17,8 @@
     }
   },
   "postCreateCommand": "npm install",
-  "remoteUser": "node"
+  "remoteUser": "node",
+  "postStartCommand": {
+    "agent-runner-telemetry": "sh -lc 'cd \"${containerWorkspaceFolder}\" 2>/dev/null || cd \"$PWD\"; if command -v agent-runner >/dev/null 2>&1; then agent-runner -C \"$PWD\" telemetry start; elif [ -x ./node_modules/.bin/agent-runner ]; then ./node_modules/.bin/agent-runner -C \"$PWD\" telemetry start; elif [ -f ./dist/cli.js ]; then node ./dist/cli.js -C \"$PWD\" telemetry start; else echo \"agent-runner telemetry autostart skipped: CLI not found\" >&2; fi' || true"
+  }
 }

@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execa } from "execa";
+import { collectCodexAccountUsageSnapshot } from "./codex-status.js";
+import { wakeTelemetryProcessor } from "./telemetry-processor.js";
 export const telemetryStateVersion = 1;
 export const defaultLocalTelemetryIntervalSeconds = 15 * 60;
 export const maxRawPayloadBytes = 2 * 1024 * 1024;
@@ -329,6 +331,49 @@ export class SimulatedIdeThreadAdapter {
         };
     }
 }
+export class CodexAccountStatusAdapter {
+    projectSlug;
+    kind = "local-workspace";
+    constructor(projectSlug) {
+        this.projectSlug = projectSlug;
+    }
+    async discover() {
+        return [
+            {
+                id: `account-usage-${this.projectSlug}`,
+                kind: "workspace",
+                sourceKind: this.kind,
+                title: "Codex account usage"
+            }
+        ];
+    }
+    async readDelta(_stream, cursor) {
+        const snapshot = await collectCodexAccountUsageSnapshot();
+        if (!snapshot) {
+            return { cursor: cursor ?? {}, payload: {}, isEmpty: true };
+        }
+        const snapshotHash = sha256Hex(JSON.stringify(snapshot));
+        if (cursor?.snapshotHash === snapshotHash) {
+            return { cursor, payload: {}, isEmpty: true };
+        }
+        return {
+            generatedAt: snapshot.collectedAt,
+            cursor: {
+                snapshotHash,
+                collectedAt: snapshot.collectedAt
+            },
+            metadata: {
+                title: "Codex account usage",
+                status: "observed",
+                latestActivity: "Codex account usage snapshot collected"
+            },
+            payload: {
+                sourceKind: this.kind,
+                accountUsage: snapshot
+            }
+        };
+    }
+}
 export function createDefaultLocalTelemetryAdapters(context) {
     return [
         new WorkspaceTelemetryAdapter(context.config.projectRoot, context.config.projectSlug, context.config.telemetry.denyGlobs),
@@ -336,7 +381,8 @@ export function createDefaultLocalTelemetryAdapters(context) {
             projectRoot: context.config.projectRoot,
             projectSlug: context.config.projectSlug,
             denyGlobs: context.config.telemetry.denyGlobs
-        })
+        }),
+        new CodexAccountStatusAdapter(context.config.projectSlug)
     ];
 }
 export async function flushLocalTelemetry(context, options = {}) {
@@ -428,6 +474,9 @@ export async function flushLocalTelemetry(context, options = {}) {
         state.lastGitHead = workspaceState.cursor.gitHead;
     }
     await writeLocalTelemetryState(state, statePath);
+    if (uploaded > 0) {
+        await wakeTelemetryProcessor(context, "local-telemetry-flush").catch(() => null);
+    }
     return {
         ok: true,
         statePath,

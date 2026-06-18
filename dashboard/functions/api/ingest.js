@@ -1,3 +1,5 @@
+import { runProcessor } from "../_shared/processor.js";
+
 const MAX_LOG_TAIL_CHARS = 100000;
 const MAX_INLINE_JSON_CHARS = 8192;
 const terminalStatuses = new Set(["completed", "failed", "stopped"]);
@@ -35,7 +37,7 @@ export async function onRequestGet({ request, env }) {
   return cors(json({ exists: Boolean(job), job: job ? { id: job.id, status: job.status, updatedAt: job.updated_at } : null }));
 }
 
-export async function onRequestPost({ request, env }) {
+export async function onRequestPost({ request, env, waitUntil }) {
   const auth = authenticate(request, env);
   if (auth) {
     return cors(json(auth.body, auth.status));
@@ -53,7 +55,7 @@ export async function onRequestPost({ request, env }) {
 
   const now = new Date().toISOString();
   if (payload?.kind === "raw-telemetry") {
-    return cors(await handleRawTelemetry(payload, env, now));
+    return cors(await handleRawTelemetry(payload, env, now, waitUntil));
   }
 
   const validation = validatePayload(payload);
@@ -154,7 +156,7 @@ export async function onRequestPost({ request, env }) {
   return cors(json({ ok: true, id: jobId, receivedAt: now }));
 }
 
-async function handleRawTelemetry(payload, env, now) {
+async function handleRawTelemetry(payload, env, now, waitUntil) {
   const validation = validateRawEnvelope(payload);
   if (validation.error) {
     return json({ error: validation.error }, 400);
@@ -410,6 +412,18 @@ async function handleRawTelemetry(payload, env, now) {
       .run();
   }
 
+  const afterIngest = Promise.all([
+    storeAccountUsageSnapshot(env, envelope, sourceDbId, chunkId, sha256, now),
+    maybeWakeProcessor(env, envelope.projectSlug, now)
+  ]).catch((error) => {
+    console.error("post-ingest processing failed:", error instanceof Error ? error.message : String(error));
+  });
+  if (typeof waitUntil === "function") {
+    waitUntil(afterIngest);
+  } else {
+    await afterIngest;
+  }
+
   return json({
     ok: true,
     id: chunkId,
@@ -419,6 +433,59 @@ async function handleRawTelemetry(payload, env, now) {
     sha256,
     receivedAt: now
   });
+}
+
+async function maybeWakeProcessor(env, projectSlug, now) {
+  if (env.AGENT_RUNNER_PROCESSOR_AUTOMATIC === "false") {
+    return;
+  }
+  await runProcessor({
+    env,
+    projectSlug,
+    ownerId: `ingest:${projectSlug}`,
+    mode: "deterministic",
+    limits: {
+      maxStreams: 3,
+      maxChunks: 24,
+      maxR2Bytes: 64 * 1024,
+      maxRuntimeMs: 5000,
+      leaseSeconds: 30
+    },
+    now: new Date(now)
+  });
+}
+
+async function storeAccountUsageSnapshot(env, envelope, sourceDbId, chunkId, sha256, now) {
+  const accountUsage = envelope.payload?.accountUsage || envelope.payload?.codexAccountStatus;
+  if (!accountUsage || typeof accountUsage !== "object" || Array.isArray(accountUsage)) {
+    return;
+  }
+  const collectedAt = nullableString(accountUsage.collectedAt) || envelope.generatedAt || now;
+  const id = `usage:${envelope.projectSlug}:${sha256.slice(0, 16)}:${chunkId.slice(-24)}`.slice(0, 300);
+  await env.DB.prepare(
+    `INSERT OR REPLACE INTO account_usage_snapshots (
+      id, project_slug, source_id, collected_at, weekly_remaining_json,
+      rolling_5h_remaining_json, token_usage_json, reset_json, metadata_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  )
+    .bind(
+      id,
+      envelope.projectSlug,
+      sourceDbId,
+      collectedAt,
+      JSON.stringify(accountUsage.weeklyRemaining || accountUsage.weekly_remaining || null),
+      JSON.stringify(accountUsage.rolling5hRemaining || accountUsage.rolling_5h_remaining || accountUsage.rollingFiveHourRemaining || null),
+      JSON.stringify(normalizeTokenUsage(accountUsage.tokenUsage || accountUsage.token_usage || {})),
+      JSON.stringify(accountUsage.reset || accountUsage.resets || {}),
+      JSON.stringify({
+        sourceEnvironment: accountUsage.sourceEnvironment || accountUsage.source_environment || null,
+        tierLabel: accountUsage.tierLabel || accountUsage.tier_label || accountUsage.accountTier || null,
+        modelUsage: accountUsage.modelUsage || accountUsage.model_usage || null,
+        source: "raw-telemetry",
+        chunkId
+      })
+    )
+    .run();
 }
 
 function validatePayload(payload) {

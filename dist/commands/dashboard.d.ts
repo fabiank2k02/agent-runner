@@ -15,3 +15,4 @@ export declare function assertDashboardLaunchConfig(context: CommandContext): vo
 export declare function startDashboardObserver(context: CommandContext, task: TaskState): Promise<DashboardObserverResult>;
 export declare function dashboardJobsUrl(endpoint: string): string;
 export declare function dashboardVerifyUrl(endpoint: string, jobId: string): string;
+export declare function dashboardProcessorUrl(endpoint: string): string;

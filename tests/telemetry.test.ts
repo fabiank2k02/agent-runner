@@ -105,7 +105,10 @@ describe("raw/local telemetry helpers", () => {
     expect(first.uploaded).toBe(1);
     expect(second.uploaded).toBe(0);
     expect(second.skipped).toBe(1);
-    expect(uploads).toHaveLength(1);
+    const rawUploads = uploads.filter((payload: any) => payload?.kind === "raw-telemetry");
+    const processorWakes = uploads.filter((payload: any) => payload?.action === "wake");
+    expect(rawUploads).toHaveLength(1);
+    expect(processorWakes).toHaveLength(1);
     expect(state.streams["codex-cli-thread:thread-1"].sequence).toBe(1);
     expect(state.streams["codex-cli-thread:thread-1"].cursor.fileOffset).toBe(10);
   });

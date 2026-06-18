@@ -170,6 +170,13 @@ export declare class SimulatedIdeThreadAdapter implements TelemetrySourceAdapter
     discover(): Promise<DiscoveredStream[]>;
     readDelta(stream: DiscoveredStream, cursor: Cursor | undefined): Promise<TelemetryDelta>;
 }
+export declare class CodexAccountStatusAdapter implements TelemetrySourceAdapter {
+    private readonly projectSlug;
+    readonly kind: "local-workspace";
+    constructor(projectSlug: string);
+    discover(): Promise<DiscoveredStream[]>;
+    readDelta(_stream: DiscoveredStream, cursor: Cursor | undefined): Promise<TelemetryDelta>;
+}
 export declare function createDefaultLocalTelemetryAdapters(context: CommandContext): TelemetrySourceAdapter[];
 export declare function flushLocalTelemetry(context: CommandContext, options?: {
     adapters?: TelemetrySourceAdapter[];

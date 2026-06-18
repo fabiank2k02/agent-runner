@@ -68,6 +68,16 @@ export function dashboardVerifyUrl(endpoint, jobId) {
     url.searchParams.set("verifyJobId", jobId);
     return url.toString();
 }
+export function dashboardProcessorUrl(endpoint) {
+    const url = new URL(endpoint);
+    url.pathname = url.pathname.replace(/\/api\/ingest\/?$/u, "/api/processor");
+    if (!url.pathname.endsWith("/api/processor")) {
+        url.pathname = "/api/processor";
+    }
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+}
 async function waitForDashboardJob(endpoint, token, jobId) {
     const verifyUrl = dashboardVerifyUrl(endpoint, jobId);
     const jobsUrl = dashboardJobsUrl(endpoint);
@@ -116,6 +126,7 @@ function observerSessionName(projectSlug, taskId) {
 function buildObserverScript(context, task, observerSession, codexHome, summaryFile) {
     const config = {
         endpoint: context.config.dashboard.endpoint,
+        processorEndpoint: dashboardProcessorUrl(context.config.dashboard.endpoint),
         token: context.config.dashboard.token,
         intervalSeconds: context.config.dashboard.intervalSeconds,
         liveIntervalSeconds: DASHBOARD_LIVE_INTERVAL_SECONDS,
@@ -171,7 +182,7 @@ const hostPath = [
   process.env.PATH || ""
 ].filter(Boolean).join(":");
 const terminalStatuses = new Set(["completed", "failed", "stopped"]);
-let rawSequence = 0;
+let rawSequence = Math.floor(Date.now() / 1000);
 
 ${telemetryRuntimeSource()}
 
@@ -532,16 +543,59 @@ function buildCostEstimate(status, logText) {
 }
 
 async function postUpdate(payload) {
-  const response = await fetch(config.endpoint, {
-    method: "POST",
-    headers: {
-      "authorization": "Bearer " + config.token,
-      "content-type": "application/json"
-    },
-    body: JSON.stringify(payload)
-  });
-  if (!response.ok) {
-    throw new Error("dashboard ingest failed: " + response.status + " " + await response.text());
+  let lastError = "";
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(config.endpoint, {
+        method: "POST",
+        headers: {
+          "authorization": "Bearer " + config.token,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+      if (response.ok) {
+        return;
+      }
+      lastError = "dashboard ingest failed: " + response.status + " " + await response.text();
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+      const cause = error && typeof error === "object" && "cause" in error ? error.cause : null;
+      if (cause) {
+        lastError += " (" + String(cause && typeof cause === "object" && "code" in cause ? cause.code : cause) + ")";
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+  }
+  throw new Error(lastError || "dashboard ingest failed");
+}
+
+async function wakeProcessor(reason) {
+  try {
+    const response = await fetch(config.processorEndpoint, {
+      method: "POST",
+      headers: {
+        "authorization": "Bearer " + config.token,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        action: "wake",
+        projectSlug: config.projectSlug,
+        ownerId: "runner-observer:" + config.projectSlug + ":" + config.observerSession + ":" + reason,
+        limits: {
+          maxStreams: 3,
+          maxChunks: 24,
+          maxR2Bytes: 65536,
+          maxRuntimeMs: 5000,
+          leaseSeconds: 30
+        }
+      })
+    });
+    if (!response.ok) {
+      throw new Error("processor wake failed: " + response.status + " " + await response.text());
+    }
+  } catch (error) {
+    console.error(new Date().toISOString(), "processor wake failed:", error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -623,6 +677,7 @@ async function safePostRawTelemetry(phase, prompt) {
         }
       })
     });
+    await wakeProcessor(phase);
   } catch (error) {
     console.error(new Date().toISOString(), "raw telemetry upload failed:", error instanceof Error ? error.message : String(error));
   }
@@ -777,19 +832,29 @@ async function main() {
   await safePostRawTelemetry("initial", prompt);
   lastRawAt = Date.now();
   while (true) {
-    const live = await liveTick(prompt, latestSummary);
-    status = live.status;
-    latestSummary = live.summary;
+    try {
+      const live = await liveTick(prompt, latestSummary);
+      status = live.status;
+      latestSummary = live.summary;
+    } catch (error) {
+      console.error(new Date().toISOString(), "live telemetry update failed:", error instanceof Error ? error.message : String(error));
+      const currentStatus = readJson(config.statusFile);
+      status = typeof currentStatus.status === "string" ? currentStatus.status : status;
+    }
     if (Date.now() - lastRawAt >= config.rawIntervalSeconds * 1000) {
       await safePostRawTelemetry("interval", prompt);
       lastRawAt = Date.now();
     }
     const shouldSummarize = terminalStatuses.has(status) || Date.now() - lastSummaryAt >= config.intervalSeconds * 1000;
     if (shouldSummarize) {
-      const durable = await summaryTick(prompt);
-      status = durable.status;
-      latestSummary = durable.summary;
-      lastSummaryAt = Date.now();
+      try {
+        const durable = await summaryTick(prompt);
+        status = durable.status;
+        latestSummary = durable.summary;
+        lastSummaryAt = Date.now();
+      } catch (error) {
+        console.error(new Date().toISOString(), "summary telemetry update failed:", error instanceof Error ? error.message : String(error));
+      }
     }
     if (terminalStatuses.has(status)) {
       await safePostRawTelemetry("terminal", prompt);

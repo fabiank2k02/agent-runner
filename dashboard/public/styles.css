@@ -308,7 +308,7 @@ h3 {
 
 .view-tabs {
   display: inline-grid;
-  grid-template-columns: repeat(3, minmax(0, auto));
+  grid-template-columns: repeat(5, minmax(0, auto));
   overflow: hidden;
   margin-bottom: 14px;
   border: 1px solid rgba(255, 255, 255, 0.09);
@@ -830,6 +830,7 @@ h3 {
 
 .spend-grid,
 .cost-grid,
+.usage-grid,
 .raw-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -842,6 +843,7 @@ h3 {
 
 .spend-grid div,
 .cost-grid div,
+.usage-grid div,
 .raw-summary div {
   min-width: 0;
   padding: 11px 12px;
@@ -878,8 +880,93 @@ h3 {
 .goals-block,
 .telemetry-block,
 .spend-block,
+.processed-block,
+.processor-block,
+.usage-block,
+.memory-block,
 .raw-block {
   background: rgba(255, 255, 255, 0.01);
+}
+
+.usage-grid {
+  border-color: rgba(244, 189, 79, 0.22);
+}
+
+.usage-grid div {
+  background: rgba(244, 189, 79, 0.035);
+}
+
+.usage-grid span,
+.usage-grid small,
+.processed-summary small,
+.memory-card span {
+  display: block;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 720;
+  text-transform: uppercase;
+}
+
+.usage-grid strong {
+  display: block;
+  min-width: 0;
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+
+.processed-summary {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.024);
+}
+
+.processed-summary p,
+.processed-summary strong {
+  overflow-wrap: anywhere;
+}
+
+.processed-summary strong {
+  color: var(--cyan);
+}
+
+.memory-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.memory-card {
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.024);
+}
+
+.memory-card strong,
+.memory-card p {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.memory-card strong {
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.memory-card p {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .goal-overview {
