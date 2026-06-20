@@ -11,6 +11,6 @@
     "db:migrate": "sh ./scripts/wrangler.sh d1 migrations apply agent-runner-dashboard --remote"
   },
   "devDependencies": {
-    "wrangler": "^4.100.0"
+    "wrangler": "^4.103.0"
   }
 }
