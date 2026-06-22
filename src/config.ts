@@ -32,9 +32,19 @@ const configFileSchema = z
         reasoningEffort: z.string().min(1).default("xhigh"),
         yolo: z.boolean().default(true),
         model: z.string().min(1).optional(),
+        execution: z.enum(["app-server", "exec"]).default("app-server"),
+        allowExecFallback: z.boolean().default(false),
         extraArgs: z.array(z.string()).default([])
       })
-      .default({ sandbox: "workspace-write", approval: "never", reasoningEffort: "xhigh", yolo: true, extraArgs: [] }),
+      .default({
+        sandbox: "workspace-write",
+        approval: "never",
+        reasoningEffort: "xhigh",
+        yolo: true,
+        execution: "app-server",
+        allowExecFallback: false,
+        extraArgs: []
+      }),
     rsync: z
       .object({
         excludes: z.array(z.string()).default([])
@@ -106,6 +116,8 @@ export interface ResolvedConfig {
     reasoningEffort: string;
     yolo: boolean;
     model?: string;
+    execution: "app-server" | "exec";
+    allowExecFallback: boolean;
     extraArgs: string[];
   };
   rsync: {
@@ -122,12 +134,16 @@ export interface ResolvedConfig {
     dropletName: string;
     tags: string[];
     hourlyPriceUsd?: number;
+    snapshotSourceId?: string | number;
+    snapshotSourceName?: string;
   };
   dashboard: {
     enabled: boolean;
     endpoint?: string;
     token?: string;
     tokenEnv: string;
+    accessClientId?: string;
+    accessClientSecret?: string;
     intervalSeconds: number;
     model?: string;
     reasoningEffort: string;
@@ -185,6 +201,14 @@ export function resolveConfig(projectRootInput = process.cwd()): ResolvedConfig 
   const dashboardEndpoint =
     fileConfig.dashboard.endpoint ?? process.env.AGENT_RUNNER_DASHBOARD_ENDPOINT;
   const dashboardToken = process.env[fileConfig.dashboard.tokenEnv];
+  const dashboardAccessClientId =
+    process.env.AGENT_RUNNER_CF_ACCESS_CLIENT_ID ??
+    process.env.CF_ACCESS_CLIENT_ID ??
+    process.env.CLOUDFLARE_ACCESS_CLIENT_ID;
+  const dashboardAccessClientSecret =
+    process.env.AGENT_RUNNER_CF_ACCESS_CLIENT_SECRET ??
+    process.env.CF_ACCESS_CLIENT_SECRET ??
+    process.env.CLOUDFLARE_ACCESS_CLIENT_SECRET;
   const digitalOceanHourlyUsd =
     fileConfig.dashboard.costs.digitalOceanHourlyUsd ??
     numberFromEnv("AGENT_RUNNER_DASHBOARD_DO_HOURLY_USD") ??
@@ -217,7 +241,11 @@ export function resolveConfig(projectRootInput = process.cwd()): ResolvedConfig 
     },
     codexAuthSource: expandHome(codexAuthSource),
     devcontainer: fileConfig.devcontainer,
-    codex: fileConfig.codex,
+    codex: {
+      ...fileConfig.codex,
+      execution: executionFromEnv() ?? fileConfig.codex.execution,
+      allowExecFallback: booleanFromEnv("AGENT_RUNNER_CODEX_ALLOW_EXEC_FALLBACK") ?? fileConfig.codex.allowExecFallback
+    },
     rsync: fileConfig.rsync,
     telemetry: {
       denyGlobs: [
@@ -235,13 +263,17 @@ export function resolveConfig(projectRootInput = process.cwd()): ResolvedConfig 
         process.env.AGENT_RUNNER_DO_DROPLET_NAME ??
         `agent-runner-${projectSlug}`,
       tags: fileConfig.digitalOcean.tags,
-      hourlyPriceUsd: digitalOceanState?.activeDroplet?.hourlyPriceUsd
+      hourlyPriceUsd: digitalOceanState?.activeDroplet?.hourlyPriceUsd,
+      snapshotSourceId: digitalOceanState?.activeDroplet?.snapshotSourceId,
+      snapshotSourceName: digitalOceanState?.activeDroplet?.snapshotSourceName
     },
     dashboard: {
-      enabled: fileConfig.dashboard.enabled ?? Boolean(dashboardEndpoint && dashboardToken),
+      enabled: fileConfig.dashboard.enabled ?? Boolean(dashboardEndpoint && (dashboardToken || (dashboardAccessClientId && dashboardAccessClientSecret))),
       endpoint: dashboardEndpoint,
       token: dashboardToken,
       tokenEnv: fileConfig.dashboard.tokenEnv,
+      accessClientId: dashboardAccessClientId,
+      accessClientSecret: dashboardAccessClientSecret,
       intervalSeconds: fileConfig.dashboard.intervalSeconds,
       model: fileConfig.dashboard.model ?? process.env.AGENT_RUNNER_DASHBOARD_MODEL,
       reasoningEffort: fileConfig.dashboard.reasoningEffort,
@@ -285,6 +317,8 @@ export function createDefaultConfig(projectRoot: string): AgentRunnerConfigFile 
       approval: "never",
       reasoningEffort: "xhigh",
       yolo: true,
+      execution: "app-server",
+      allowExecFallback: false,
       extraArgs: []
     },
     rsync: {
@@ -321,4 +355,17 @@ function stringListFromEnv(name: string): string[] {
     return [];
   }
   return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function executionFromEnv(): "app-server" | "exec" | undefined {
+  const value = process.env.AGENT_RUNNER_CODEX_EXECUTION;
+  return value === "app-server" || value === "exec" ? value : undefined;
+}
+
+function booleanFromEnv(name: string): boolean | undefined {
+  const value = process.env[name];
+  if (value === undefined || value === "") {
+    return undefined;
+  }
+  return ["1", "true", "yes", "on"].includes(value.toLowerCase());
 }

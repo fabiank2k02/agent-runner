@@ -1,3 +1,8 @@
+import {
+  aggregateAccountUsageRows,
+  extractStreamTokenUsage
+} from "./usage.js";
+
 export const deterministicProcessorVersion = "deterministic-2026-06-17";
 
 const terminalStatuses = new Set(["completed", "failed", "stopped"]);
@@ -260,7 +265,7 @@ export async function processorStatus({ env, projectSlug, now = new Date() }) {
     )
     .bind(cleanProjectSlug)
     .all();
-  const usage = await latestAccountUsage(env.DB, cleanProjectSlug);
+  const usage = await latestAccountUsage(env.DB, cleanProjectSlug, env);
   const streamRows = streams.results || [];
   const pendingStreams = streamRows.filter((row) => Number(row.latest_sequence || 0) > Number(row.processed_sequence || 0));
   const latestRawSequence = streamRows.reduce((max, row) => Math.max(max, Number(row.latest_sequence || 0)), 0);
@@ -374,7 +379,7 @@ export async function processAvailableStreams(env, { projectSlug, ownerId, runId
     if (!chunkRows.length && stream.processed_through_sequence) {
       continue;
     }
-    const aggregate = seedAggregate(stream, now);
+    const aggregate = seedAggregate(stream, now, { includeStreamTokenUsage: chunkRows.length === 0 });
     for (const chunk of chunkRows) {
       if (Date.now() - startedMs > limits.maxRuntimeMs || remainingChunkBudget <= 0) {
         break;
@@ -442,12 +447,13 @@ export async function clearProcessedScope(db, projectSlug, scope = {}) {
   return { scope: "project", projectSlug };
 }
 
-function seedAggregate(stream, now) {
+function seedAggregate(stream, now, options = {}) {
   const files = filesMapFromArray(parseJson(stream.processed_files_json, []));
   const blockers = parseJson(stream.processed_blocker_json, []);
   const metadata = parseJson(stream.processed_metadata_json, {});
   const processedTokenUsage = parseJson(stream.processed_token_usage_json, {});
-  const tokenUsage = stream.processed_through_sequence
+  const includeStreamTokenUsage = options.includeStreamTokenUsage !== false;
+  const tokenUsage = stream.processed_through_sequence || !includeStreamTokenUsage
     ? processedTokenUsage
     : addTokenUsage(processedTokenUsage, parseJson(stream.token_usage_json, {}));
   return {
@@ -926,20 +932,7 @@ function nextActionForAggregate(aggregate, chunk) {
 }
 
 function extractTokenUsage(metadata, payload) {
-  const candidates = [
-    metadata?.tokenUsage,
-    payload?.tokenUsage,
-    payload?.thread?.tokenUsage,
-    payload?.codexJsonl?.tokenUsage,
-    payload?.telemetry?.tokenUsage,
-    payload?.telemetry?.spend,
-    payload?.summary?.cost
-  ];
-  const usage = {};
-  for (const candidate of candidates) {
-    Object.assign(usage, addTokenUsage(usage, candidate || {}));
-  }
-  return usage;
+  return extractStreamTokenUsage(metadata, payload);
 }
 
 function addTokenUsage(left = {}, right = {}) {
@@ -960,6 +953,9 @@ function extractCost(payload) {
 function addCost(left = {}, right = {}) {
   const result = { ...left };
   for (const [key, value] of Object.entries(right || {})) {
+    if (key === "confidence" || key === "digitalOceanConfidence" || key === "codexAllocationConfidence") {
+      continue;
+    }
     if (typeof value === "number" && Number.isFinite(value)) {
       result[key] = finiteNumber(result[key]) + value;
     } else if (result[key] === undefined && value !== undefined) {
@@ -1201,7 +1197,7 @@ async function updateProcessingRun(db, { id, status, finishedAt, errors, stats, 
     .run();
 }
 
-async function latestAccountUsage(db, projectSlug) {
+async function latestAccountUsage(db, projectSlug, env = {}) {
   const rows = await db
     .prepare(
       `SELECT id, source_id, collected_at, weekly_remaining_json, rolling_5h_remaining_json,
@@ -1213,59 +1209,21 @@ async function latestAccountUsage(db, projectSlug) {
     )
     .bind(projectSlug)
     .all();
-  const snapshots = (rows.results || []).map((row) => ({
-    id: row.id,
-    sourceId: row.source_id,
-    collectedAt: row.collected_at,
-    weeklyRemaining: parseJson(row.weekly_remaining_json, null),
-    rolling5hRemaining: parseJson(row.rolling_5h_remaining_json, null),
-    tokenUsage: parseJson(row.token_usage_json, {}),
-    reset: parseJson(row.reset_json, {}),
-    metadata: parseJson(row.metadata_json, {})
-  }));
-  const aggregate = {
-    snapshots,
-    latest: snapshots[0] || null,
-    tokensLastHour: 0,
-    tokensToday: 0,
-    tokensThisWeek: 0,
-    tokenBurnRatePerHour: 0,
-    estimatedHoursUntilLimit: null,
-    label: "observed/estimated"
-  };
-  const now = Date.now();
-  for (const snapshot of snapshots) {
-    const collected = Date.parse(snapshot.collectedAt);
-    const tokens = finiteNumber(snapshot.tokenUsage?.totalTokens ?? snapshot.tokenUsage?.tokens);
-    if (Number.isFinite(collected) && now - collected <= 60 * 60 * 1000) {
-      aggregate.tokensLastHour += tokens;
-    }
-    if (Number.isFinite(collected) && now - collected <= 24 * 60 * 60 * 1000) {
-      aggregate.tokensToday += tokens;
-    }
-    if (Number.isFinite(collected) && now - collected <= 7 * 24 * 60 * 60 * 1000) {
-      aggregate.tokensThisWeek += tokens;
-    }
-  }
-  aggregate.tokenBurnRatePerHour = aggregate.tokensLastHour;
-  const remaining = finiteNumber(aggregate.latest?.weeklyRemaining?.remainingTokens ?? aggregate.latest?.weeklyRemaining?.remaining);
-  aggregate.estimatedHoursUntilLimit =
-    remaining && aggregate.tokenBurnRatePerHour ? Math.max(0, remaining / aggregate.tokenBurnRatePerHour) : null;
-  return aggregate;
+  return aggregateAccountUsageRows(rows.results || [], { env });
 }
 
 function budgetWarnings({ usage, lastRun }) {
   const warnings = [];
-  const weeklyPercent = finiteNumber(usage?.latest?.weeklyRemaining?.percentRemaining);
-  if (weeklyPercent && weeklyPercent < 15) {
+  const weeklyPercent = nullableNumber(usage?.weekly?.percentRemaining ?? usage?.latest?.weeklyRemaining?.percentRemaining);
+  if (weeklyPercent !== null && weeklyPercent < 15) {
     warnings.push({
       kind: "codex_weekly_limit_low",
       severity: weeklyPercent < 5 ? "error" : "warning",
       message: `Observed weekly Codex limit is low (${weeklyPercent.toFixed(1)}% remaining).`
     });
   }
-  const rollingPercent = finiteNumber(usage?.latest?.rolling5hRemaining?.percentRemaining);
-  if (rollingPercent && rollingPercent < 15) {
+  const rollingPercent = nullableNumber(usage?.rolling5h?.percentRemaining ?? usage?.latest?.rolling5hRemaining?.percentRemaining);
+  if (rollingPercent !== null && rollingPercent < 15) {
     warnings.push({
       kind: "codex_5h_limit_low",
       severity: rollingPercent < 5 ? "error" : "warning",
@@ -1317,6 +1275,14 @@ function boundedInteger(value, fallback, min, max) {
 function finiteNumber(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
+}
+
+function nullableNumber(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
 }
 
 function snakeValue(object, camelKey) {

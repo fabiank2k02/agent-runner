@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { onRequestGet as processedStreamsGet } from "../dashboard/functions/api/processed-streams.js";
 import { onRequestGet as memoryGet } from "../dashboard/functions/api/memory.js";
+import { onRequestGet as localThreadsGet } from "../dashboard/functions/api/local-threads.js";
 
 class FakeD1 {
   constructor(private readonly results: unknown[]) {}
@@ -20,9 +21,10 @@ describe("processed dashboard APIs", () => {
   it("reads processed stream read models through Access-authenticated requests", async () => {
     const response = await processedStreamsGet({
       request: new Request("https://dashboard.example.com/api/processed-streams?projectSlug=sample", {
-        headers: { "cf-access-authenticated-user-email": "me@example.com" }
+        headers: { authorization: "Bearer dev-token" }
       }),
       env: {
+        AGENT_RUNNER_DASHBOARD_TOKEN: "dev-token",
         DB: new FakeD1([
           {
             id: "codex-thread:sample:thread-1",
@@ -86,5 +88,42 @@ describe("processed dashboard APIs", () => {
     expect(response.status).toBe(200);
     expect(body.memories[0].title).toBe("Run tests");
     expect(body.memories[0].evidence[0].chunkId).toBe("chunk-1");
+  });
+
+  it("exposes the local-threads compatibility route as JSON", async () => {
+    const response = await localThreadsGet({
+      request: new Request("https://dashboard.example.com/api/local-threads", {
+        headers: { authorization: "Bearer dev-token" }
+      }),
+      env: {
+        AGENT_RUNNER_DASHBOARD_TOKEN: "dev-token",
+        DB: new FakeD1([
+          {
+            id: "codex-thread:sample:thread-1",
+            source_kind: "codex-cli-thread",
+            source_id: "codex-cli-thread:sample:host",
+            stream_kind: "codex-thread",
+            project_slug: "sample",
+            thread_id: "thread-1",
+            title: "Thread 1",
+            status: "active",
+            latest_activity: "Writing tests",
+            created_at: "2026-06-17T00:00:00.000Z",
+            updated_at: "2026-06-17T00:00:00.000Z",
+            last_telemetry_at: "2026-06-17T00:00:00.000Z",
+            latest_raw_telemetry_at: "2026-06-17T00:00:00.000Z",
+            token_usage_json: "{\"totalTokens\":10}",
+            linked_runner_job_id: null,
+            raw_chunk_count: 1,
+            metadata_json: "{}"
+          }
+        ])
+      }
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(body.threads[0].threadId).toBe("thread-1");
   });
 });

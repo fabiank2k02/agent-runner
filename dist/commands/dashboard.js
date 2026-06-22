@@ -1,3 +1,4 @@
+import { dashboardAuthHeaders, readDashboardJson } from "../dashboard-api.js";
 import { telemetryRuntimeSource } from "../dashboard-telemetry.js";
 import { joinRemotePath } from "../quote.js";
 import { quoteRemotePath, shellQuote } from "../quote.js";
@@ -19,8 +20,8 @@ export function assertDashboardLaunchConfig(context) {
     if (!config.dashboard.endpoint) {
         throw new DashboardLaunchError("Dashboard reporting is required, but AGENT_RUNNER_DASHBOARD_ENDPOINT is not set.");
     }
-    if (!config.dashboard.token) {
-        throw new DashboardLaunchError(`Dashboard reporting is required, but ${config.dashboard.tokenEnv} is not set.`);
+    if (!config.dashboard.token && !(config.dashboard.accessClientId && config.dashboard.accessClientSecret)) {
+        throw new DashboardLaunchError(`Dashboard reporting is required, but neither ${config.dashboard.tokenEnv} nor AGENT_RUNNER_CF_ACCESS_CLIENT_ID/AGENT_RUNNER_CF_ACCESS_CLIENT_SECRET is set.`);
     }
 }
 export async function startDashboardObserver(context, task) {
@@ -37,7 +38,7 @@ export async function startDashboardObserver(context, task) {
     await remote.writeText(observerScriptFile, buildObserverScript(context, task, observerSession, codexHome, summaryFile), "700");
     await remote.run(`tmux new-session -d -s ${shellQuote(observerSession)} ${shellQuote(`PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH" node ${quoteRemotePath(observerScriptFile)} >> ${quoteRemotePath(observerLogFile)} 2>&1`)}`);
     try {
-        await waitForDashboardJob(config.dashboard.endpoint, config.dashboard.token, `${layout.projectSlug}:${task.taskId}`);
+        await waitForDashboardJob(context, `${layout.projectSlug}:${task.taskId}`);
     }
     catch (error) {
         await remote.run(`tmux kill-session -t ${shellQuote(observerSession)} 2>/dev/null || true`);
@@ -78,7 +79,8 @@ export function dashboardProcessorUrl(endpoint) {
     url.hash = "";
     return url.toString();
 }
-async function waitForDashboardJob(endpoint, token, jobId) {
+async function waitForDashboardJob(context, jobId) {
+    const endpoint = context.config.dashboard.endpoint;
     const verifyUrl = dashboardVerifyUrl(endpoint, jobId);
     const jobsUrl = dashboardJobsUrl(endpoint);
     const deadline = Date.now() + DASHBOARD_LAUNCH_TIMEOUT_MS;
@@ -86,11 +88,9 @@ async function waitForDashboardJob(endpoint, token, jobId) {
     while (Date.now() < deadline) {
         try {
             const verifyResponse = await fetch(verifyUrl, {
-                headers: {
-                    authorization: `Bearer ${token}`
-                }
+                headers: dashboardAuthHeaders(context.config.dashboard)
             });
-            const verifyBody = (await verifyResponse.json().catch(() => ({})));
+            const { body: verifyBody } = await readDashboardJson(verifyResponse, "dashboard verification");
             if (verifyResponse.ok && verifyBody.exists === true) {
                 return;
             }
@@ -101,11 +101,9 @@ async function waitForDashboardJob(endpoint, token, jobId) {
                 ? `job ${jobId} was not present in GET /api/ingest verification`
                 : verifyBody?.error || verifyResponse.statusText;
             const jobsResponse = await fetch(jobsUrl, {
-                headers: {
-                    authorization: `Bearer ${token}`
-                }
+                headers: dashboardAuthHeaders(context.config.dashboard)
             });
-            const jobsBody = (await jobsResponse.json().catch(() => ({})));
+            const { body: jobsBody } = await readDashboardJson(jobsResponse, "dashboard jobs");
             if (jobsResponse.ok && Array.isArray(jobsBody.jobs) && jobsBody.jobs.some((job) => job.id === jobId)) {
                 return;
             }
@@ -128,6 +126,8 @@ function buildObserverScript(context, task, observerSession, codexHome, summaryF
         endpoint: context.config.dashboard.endpoint,
         processorEndpoint: dashboardProcessorUrl(context.config.dashboard.endpoint),
         token: context.config.dashboard.token,
+        accessClientId: context.config.dashboard.accessClientId,
+        accessClientSecret: context.config.dashboard.accessClientSecret,
         intervalSeconds: context.config.dashboard.intervalSeconds,
         liveIntervalSeconds: DASHBOARD_LIVE_INTERVAL_SECONDS,
         rawIntervalSeconds: DASHBOARD_RAW_INTERVAL_SECONDS,
@@ -161,6 +161,8 @@ function buildObserverScript(context, task, observerSession, codexHome, summaryF
             size: context.config.digitalOcean.size,
             image: context.config.digitalOcean.image,
             dropletName: context.config.digitalOcean.dropletName,
+            snapshotSourceId: context.config.digitalOcean.snapshotSourceId || null,
+            snapshotSourceName: context.config.digitalOcean.snapshotSourceName || null,
             hourlyPriceUsd: context.config.digitalOcean.hourlyPriceUsd || context.config.dashboard.costs.digitalOceanHourlyUsd
         },
         runnerVersion: "0.1.0"
@@ -217,6 +219,21 @@ function readJson(file) {
   } catch {
     return {};
   }
+}
+
+function apiHeaders(contentType) {
+  const headers = {};
+  if (config.token) {
+    headers.authorization = "Bearer " + config.token;
+  }
+  if (config.accessClientId && config.accessClientSecret) {
+    headers["CF-Access-Client-Id"] = config.accessClientId;
+    headers["CF-Access-Client-Secret"] = config.accessClientSecret;
+  }
+  if (contentType) {
+    headers["content-type"] = "application/json";
+  }
+  return headers;
 }
 
 function tailLines(file, maxLines) {
@@ -472,10 +489,12 @@ function normalizeCost(value) {
     elapsedMinutes: normalizeNullableNumber(cost.elapsedMinutes, 0),
     digitalOceanHourlyUsd: normalizeNullableNumber(cost.digitalOceanHourlyUsd, 0),
     digitalOceanCostUsd: normalizeNullableNumber(cost.digitalOceanCostUsd, 0),
-    digitalOceanConfidence: typeof cost.digitalOceanConfidence === "string" ? cost.digitalOceanConfidence.slice(0, 60) : "unknown",
+    digitalOceanMethod: typeof cost.digitalOceanMethod === "string" ? cost.digitalOceanMethod.slice(0, 60) : "unknown",
     codexSubscriptionMonthlyUsd: normalizeNullableNumber(cost.codexSubscriptionMonthlyUsd, 0),
     codexSubscriptionSeatMultiplier: normalizeNullableNumber(cost.codexSubscriptionSeatMultiplier, 0) ?? 1,
+    codexSubscriptionPriceMethod: typeof cost.codexSubscriptionPriceMethod === "string" ? cost.codexSubscriptionPriceMethod.slice(0, 60) : "unknown",
     codexWeeklyBudgetUsd: normalizeNullableNumber(cost.codexWeeklyBudgetUsd, 0),
+    codexWeeklyBudgetFormula: typeof cost.codexWeeklyBudgetFormula === "string" ? cost.codexWeeklyBudgetFormula.slice(0, 160) : null,
     codexSubscriptionMonthlyTokens: normalizeNullableNumber(cost.codexSubscriptionMonthlyTokens, 0),
     codexWeeklyTokenAllowance: normalizeNullableNumber(cost.codexWeeklyTokenAllowance, 0),
     codexObservedWeeklyTokens: normalizeNullableNumber(cost.codexObservedWeeklyTokens, 0),
@@ -483,11 +502,13 @@ function normalizeCost(value) {
     codexTokenCostUsd: normalizeNullableNumber(cost.codexTokenCostUsd, 0),
     codexTaskAllocationPercent: normalizeNullableNumber(cost.codexTaskAllocationPercent, 0),
     codexRemainingWeeklyBudgetUsd: normalizeNullableNumber(cost.codexRemainingWeeklyBudgetUsd, 0),
-    codexAllocationConfidence: typeof cost.codexAllocationConfidence === "string" ? cost.codexAllocationConfidence.slice(0, 60) : "unknown",
+    codexAllocationMethod: typeof cost.codexAllocationMethod === "string" ? cost.codexAllocationMethod.slice(0, 60) : "unknown",
     codexAllocationSource: typeof cost.codexAllocationSource === "string" ? cost.codexAllocationSource.slice(0, 80) : "unknown",
+    codexCostMethod: typeof cost.codexCostMethod === "string" ? cost.codexCostMethod.slice(0, 60) : "unknown",
+    codexCostSource: typeof cost.codexCostSource === "string" ? cost.codexCostSource.slice(0, 80) : "unknown",
+    tokenUsageMethod: typeof cost.tokenUsageMethod === "string" ? cost.tokenUsageMethod.slice(0, 60) : "unknown",
     totalOperationalCostUsd: normalizeNullableNumber(cost.totalOperationalCostUsd, 0),
     totalEstimatedCostUsd: normalizeNullableNumber(cost.totalEstimatedCostUsd, 0),
-    confidence: typeof cost.confidence === "string" ? cost.confidence.slice(0, 60) : "unknown",
     totalTokens: normalizeNullableNumber(cost.totalTokens, 0),
     inputTokens: normalizeNullableNumber(cost.inputTokens, 0),
     cachedInputTokens: normalizeNullableNumber(cost.cachedInputTokens, 0),
@@ -548,10 +569,7 @@ async function postUpdate(payload) {
     try {
       const response = await fetch(config.endpoint, {
         method: "POST",
-        headers: {
-          "authorization": "Bearer " + config.token,
-          "content-type": "application/json"
-        },
+        headers: apiHeaders(true),
         body: JSON.stringify(payload)
       });
       if (response.ok) {
@@ -574,10 +592,7 @@ async function wakeProcessor(reason) {
   try {
     const response = await fetch(config.processorEndpoint, {
       method: "POST",
-      headers: {
-        "authorization": "Bearer " + config.token,
-        "content-type": "application/json"
-      },
+      headers: apiHeaders(true),
       body: JSON.stringify({
         action: "wake",
         projectSlug: config.projectSlug,

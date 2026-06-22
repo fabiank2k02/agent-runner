@@ -76,10 +76,12 @@ export interface SpendEstimate extends TokenUsage {
   elapsedMinutes: number | null;
   digitalOceanHourlyUsd: number | null;
   digitalOceanCostUsd: number | null;
-  digitalOceanConfidence: string;
+  digitalOceanMethod: "allocated" | "unknown";
   codexSubscriptionMonthlyUsd: number | null;
   codexSubscriptionSeatMultiplier: number;
+  codexSubscriptionPriceMethod: "measured" | "estimated";
   codexWeeklyBudgetUsd: number | null;
+  codexWeeklyBudgetFormula: string | null;
   codexSubscriptionMonthlyTokens: number | null;
   codexWeeklyTokenAllowance: number | null;
   codexObservedWeeklyTokens: number | null;
@@ -87,11 +89,12 @@ export interface SpendEstimate extends TokenUsage {
   codexTokenCostUsd: number | null;
   codexTaskAllocationPercent: number | null;
   codexRemainingWeeklyBudgetUsd: number | null;
-  codexAllocationConfidence: string;
+  codexAllocationMethod: "measured" | "estimated" | "unknown";
   codexAllocationSource: string;
+  codexCostMethod: "measured" | "estimated" | "unknown";
+  codexCostSource: string;
   totalOperationalCostUsd: number | null;
   totalEstimatedCostUsd: number | null;
-  confidence: string;
 }
 
 export interface GoalSummary {
@@ -232,46 +235,45 @@ export function calculateSubscriptionSpend(input: SpendInputs): SpendEstimate {
   const digitalOceanHourlyUsd = nullablePositive(costs.digitalOceanHourlyUsd);
   const digitalOceanCostUsd =
     elapsedMinutes === null || digitalOceanHourlyUsd === null ? null : digitalOceanHourlyUsd * (elapsedMinutes / 60);
-  const digitalOceanConfidence = digitalOceanCostUsd === null ? "missing_rate" : "configured";
+  const digitalOceanMethod = digitalOceanCostUsd === null ? "unknown" : "allocated";
 
-  const codexSubscriptionMonthlyUsd = nullablePositive(costs.codexSubscriptionMonthlyUsd);
+  const configuredCodexMonthlyUsd = nullablePositive(costs.codexSubscriptionMonthlyUsd);
+  const codexSubscriptionMonthlyUsd = configuredCodexMonthlyUsd ?? 100;
   const codexSubscriptionSeatMultiplier = nullablePositive(costs.codexSubscriptionSeatMultiplier) ?? 1;
   const codexWeeklyBudgetUsd =
     codexSubscriptionMonthlyUsd === null
       ? null
       : (codexSubscriptionMonthlyUsd * codexSubscriptionSeatMultiplier) / WEEKS_PER_MONTH;
+  const codexSubscriptionPriceMethod = configuredCodexMonthlyUsd === null ? "estimated" : "measured";
+  const codexWeeklyBudgetFormula =
+    codexWeeklyBudgetUsd === null
+      ? null
+      : `${formatUsd(codexSubscriptionMonthlyUsd)} monthly / ${WEEKS_PER_MONTH.toFixed(2)} = ${formatUsd(codexWeeklyBudgetUsd)} weekly`;
 
   const codexSubscriptionMonthlyTokens = nullablePositive(costs.codexSubscriptionMonthlyTokens);
   const configuredWeeklyTokens = nullablePositive(costs.codexWeeklyTokenAllowance);
   const observedWeeklyTokens = nullablePositive(costs.codexObservedWeeklyTokens);
   const estimatedWeeklyTokens = codexSubscriptionMonthlyTokens === null ? null : codexSubscriptionMonthlyTokens / WEEKS_PER_MONTH;
   const codexWeeklyTokenAllowance = configuredWeeklyTokens ?? observedWeeklyTokens ?? estimatedWeeklyTokens;
-  const tokenAllowanceSource = configuredWeeklyTokens
-    ? "configured"
-    : observedWeeklyTokens
-      ? "observed"
-      : estimatedWeeklyTokens
-        ? "estimated"
-        : "missing_tokens";
+  const tokenAllowanceSource = configuredWeeklyTokens || observedWeeklyTokens ? "measured" : estimatedWeeklyTokens ? "estimated" : "unknown";
 
   let codexTaskAllocationUsd: number | null = null;
-  let codexAllocationConfidence = "not_configured";
+  let codexAllocationMethod: "measured" | "estimated" | "unknown" = "unknown";
   let codexAllocationSource = "missing_budget";
   if (codexWeeklyBudgetUsd !== null) {
     if (usage.totalTokens > 0 && codexWeeklyTokenAllowance !== null) {
       codexTaskAllocationUsd = codexWeeklyBudgetUsd * (usage.totalTokens / codexWeeklyTokenAllowance);
-      codexAllocationConfidence = tokenAllowanceSource;
+      codexAllocationMethod = tokenAllowanceSource;
       codexAllocationSource = `${tokenAllowanceSource}_tokens`;
     } else if (elapsedMinutes !== null) {
       codexTaskAllocationUsd = codexWeeklyBudgetUsd * (elapsedMinutes / WEEK_MINUTES);
-      codexAllocationConfidence = "missing_tokens";
+      codexAllocationMethod = "estimated";
       codexAllocationSource = "runtime_allocation";
     } else {
-      codexAllocationConfidence = "missing_tokens";
+      codexAllocationMethod = "unknown";
       codexAllocationSource = "missing_tokens";
     }
   }
-
   const codexTaskAllocationPercent =
     codexTaskAllocationUsd === null || codexWeeklyBudgetUsd === null || codexWeeklyBudgetUsd === 0
       ? null
@@ -288,10 +290,12 @@ export function calculateSubscriptionSpend(input: SpendInputs): SpendEstimate {
     elapsedMinutes,
     digitalOceanHourlyUsd,
     digitalOceanCostUsd,
-    digitalOceanConfidence,
+    digitalOceanMethod,
     codexSubscriptionMonthlyUsd,
     codexSubscriptionSeatMultiplier,
+    codexSubscriptionPriceMethod,
     codexWeeklyBudgetUsd,
+    codexWeeklyBudgetFormula,
     codexSubscriptionMonthlyTokens,
     codexWeeklyTokenAllowance,
     codexObservedWeeklyTokens: observedWeeklyTokens,
@@ -299,11 +303,12 @@ export function calculateSubscriptionSpend(input: SpendInputs): SpendEstimate {
     codexTokenCostUsd: codexTaskAllocationUsd,
     codexTaskAllocationPercent,
     codexRemainingWeeklyBudgetUsd,
-    codexAllocationConfidence,
+    codexAllocationMethod,
     codexAllocationSource,
+    codexCostMethod: codexAllocationMethod,
+    codexCostSource: codexAllocationSource,
     totalOperationalCostUsd,
-    totalEstimatedCostUsd: totalOperationalCostUsd,
-    confidence: [digitalOceanConfidence, codexAllocationConfidence].includes("missing_tokens") ? "low" : codexAllocationConfidence
+    totalEstimatedCostUsd: totalOperationalCostUsd
   };
 }
 
@@ -427,6 +432,7 @@ export function telemetryRuntimeSource(): string {
     extractLiveEvents.toString(),
     aggregateFileActivity.toString(),
     extractTokenUsage.toString(),
+    formatUsd.toString(),
     calculateSubscriptionSpend.toString(),
     deriveGoalsFromPrompt.toString(),
     deriveSubgoalsFromEvents.toString(),
@@ -994,6 +1000,10 @@ function nullablePositive(value: unknown): number | null {
 function finiteNumber(value: unknown): number {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
+}
+
+function formatUsd(value: number): string {
+  return `$${value.toFixed(2)}`;
 }
 
 function stableId(...parts: string[]): string {

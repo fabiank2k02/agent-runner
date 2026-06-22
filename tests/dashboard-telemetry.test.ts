@@ -82,10 +82,11 @@ describe("dashboard telemetry helpers", () => {
     expect(spend.codexTaskAllocationUsd).toBeCloseTo(2.3077, 4);
     expect(spend.digitalOceanCostUsd).toBeCloseTo(0.04, 4);
     expect(spend.totalOperationalCostUsd).toBeCloseTo(2.3477, 4);
-    expect(spend.codexAllocationConfidence).toBe("configured");
+    expect(spend.codexCostMethod).toBe("measured");
+    expect(spend.codexAllocationMethod).toBe("measured");
   });
 
-  it("falls back to runtime allocation when token usage is missing", () => {
+  it("defaults subscription price to 100 USD and falls back to runtime allocation when token usage is missing", () => {
     const spend = calculateSubscriptionSpend({
       usage: {
         inputTokens: 0,
@@ -96,14 +97,13 @@ describe("dashboard telemetry helpers", () => {
       },
       startedAt: "2026-06-17T00:00:00Z",
       finishedAt: "2026-06-17T02:00:00Z",
-      costs: {
-        codexSubscriptionMonthlyUsd: 100,
-        codexSubscriptionSeatMultiplier: 1
-      }
+      costs: {}
     });
 
+    expect(spend.codexSubscriptionMonthlyUsd).toBe(100);
+    expect(spend.codexSubscriptionPriceMethod).toBe("estimated");
     expect(spend.codexTaskAllocationUsd).toBeGreaterThan(0);
-    expect(spend.codexAllocationConfidence).toBe("missing_tokens");
+    expect(spend.codexCostMethod).toBe("estimated");
     expect(spend.codexAllocationSource).toBe("runtime_allocation");
   });
 

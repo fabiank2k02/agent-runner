@@ -1,12 +1,20 @@
 import type { CommandContext } from "../context.js";
 import { quoteRemotePath, shellQuote } from "../quote.js";
 
-export async function upDevcontainer(context: CommandContext): Promise<void> {
+export interface DevcontainerUpResult {
+  devcontainerReadyDurationMs: number;
+  codexInstallDurationMs: number;
+  codexAppServerReadyDurationMs: number;
+}
+
+export async function upDevcontainer(context: CommandContext): Promise<DevcontainerUpResult> {
   const { config, layout, remote } = context;
   const extra = config.devcontainer.extraArgs.map(shellQuote).join(" ");
   const workspace = quoteRemotePath(layout.remoteProjectDir);
   const upCommand = `devcontainer up --workspace-folder ${workspace}${extra ? ` ${extra}` : ""}`;
+  const devcontainerStarted = Date.now();
   await remote.run(upCommand);
+  const devcontainerReadyDurationMs = Date.now() - devcontainerStarted;
 
   const installScript = `
 set -e
@@ -44,5 +52,20 @@ codex --version >/dev/null 2>&1 || true
     `devcontainer exec --workspace-folder ${workspace} sh -lc ${shellQuote(installScript)}`,
     `< ${quoteRemotePath(layout.remoteCodexAuthFile)}`
   ].join(" ");
+  const codexInstallStarted = Date.now();
   await remote.run(execCommand);
+  const codexInstallDurationMs = Date.now() - codexInstallStarted;
+
+  const appServerCheck = `devcontainer exec --workspace-folder ${workspace} sh -lc ${shellQuote(
+    'PATH="$HOME/.local/bin:$PATH" codex app-server --help >/dev/null'
+  )}`;
+  const appServerStarted = Date.now();
+  await remote.run(appServerCheck);
+  const codexAppServerReadyDurationMs = Date.now() - appServerStarted;
+
+  return {
+    devcontainerReadyDurationMs,
+    codexInstallDurationMs,
+    codexAppServerReadyDurationMs
+  };
 }

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { execa } from "execa";
 import { collectCodexAccountUsageSnapshot } from "./codex-status.js";
+import { dashboardAuthHeaders, readDashboardJson } from "./dashboard-api.js";
 import { wakeTelemetryProcessor } from "./telemetry-processor.js";
 export const telemetryStateVersion = 1;
 export const defaultLocalTelemetryIntervalSeconds = 15 * 60;
@@ -14,6 +15,16 @@ export const maxLogLinesPerChunk = 500;
 export const maxCommandOutputSnippetBytes = 16 * 1024;
 export const maxPromptBytes = 32 * 1024;
 export const redactedSecretMarker = "[REDACTED_SECRET]";
+export class TelemetryIngestError extends Error {
+    status;
+    body;
+    constructor(message, status, body) {
+        super(message);
+        this.status = status;
+        this.body = body;
+        this.name = "TelemetryIngestError";
+    }
+}
 export function redactSecrets(input) {
     let output = String(input || "");
     output = output.replace(/\b(OPENAI_API_KEY|CODEX_API_KEY|CODEX_ACCESS_TOKEN|DIGITALOCEAN_TOKEN|DIGITALOCEAN_ACCESS_TOKEN|CLOUDFLARE_API_TOKEN|CLOUDFLARE_TOKEN|GH_TOKEN|GITHUB_TOKEN)\b\s*[:=]\s*["']?[^"'\s,;]+/giu, (_match, name) => `${name}=${redactedSecretMarker}`);
@@ -426,14 +437,12 @@ export async function flushLocalTelemetry(context, options = {}) {
                 });
                 continue;
             }
-            const sequence = streamState.sequence + 1;
-            const envelope = makeRawTelemetryEnvelope({
+            const baseEnvelope = {
                 sourceKind: adapter.kind,
                 sourceId: defaultSourceId(adapter.kind, context.config.projectSlug),
                 streamKind: stream.kind,
                 projectSlug: context.config.projectSlug,
                 streamId: stream.id,
-                sequence,
                 generatedAt: delta.generatedAt ?? options.now?.toISOString(),
                 cursor: delta.cursor,
                 metadata: {
@@ -442,8 +451,27 @@ export async function flushLocalTelemetry(context, options = {}) {
                     workspaceRoot: context.config.projectRoot
                 },
                 payload: delta.payload
-            });
-            await uploadRawTelemetryEnvelope(context, envelope);
+            };
+            let sequence = streamState.sequence + 1;
+            let sequenceRetries = 0;
+            while (true) {
+                const envelope = makeRawTelemetryEnvelope({
+                    ...baseEnvelope,
+                    sequence
+                });
+                try {
+                    await uploadRawTelemetryEnvelope(context, envelope);
+                    break;
+                }
+                catch (error) {
+                    const latestSequence = ingestConflictLatestSequence(error);
+                    if (latestSequence === null || sequenceRetries >= 3) {
+                        throw error;
+                    }
+                    sequence = Math.max(sequence, latestSequence) + 1;
+                    sequenceRetries += 1;
+                }
+            }
             uploaded += 1;
             state.lastStreamSequence = Math.max(state.lastStreamSequence, sequence);
             state.lastUploadTime = new Date().toISOString();
@@ -487,21 +515,27 @@ export async function flushLocalTelemetry(context, options = {}) {
 }
 export async function uploadRawTelemetryEnvelope(context, envelope) {
     const endpoint = context.config.dashboard.endpoint;
-    const token = context.config.dashboard.token;
-    if (!endpoint || !token) {
-        throw new Error(`Telemetry upload requires AGENT_RUNNER_DASHBOARD_ENDPOINT and ${context.config.dashboard.tokenEnv}.`);
+    if (!endpoint || !hasDashboardAuth(context.config.dashboard)) {
+        throw new Error(`Telemetry upload requires AGENT_RUNNER_DASHBOARD_ENDPOINT and either ${context.config.dashboard.tokenEnv} or AGENT_RUNNER_CF_ACCESS_CLIENT_ID/AGENT_RUNNER_CF_ACCESS_CLIENT_SECRET.`);
     }
     const response = await fetch(endpoint, {
         method: "POST",
-        headers: {
-            authorization: `Bearer ${token}`,
-            "content-type": "application/json"
-        },
+        headers: dashboardAuthHeaders(context.config.dashboard, { contentType: true }),
         body: JSON.stringify(envelope)
     });
+    const { body } = await readDashboardJson(response, "telemetry ingest");
     if (!response.ok) {
-        throw new Error(`telemetry ingest failed: ${response.status} ${await response.text()}`);
+        throw new TelemetryIngestError(`telemetry ingest failed: ${response.status} ${body?.error || response.statusText}`, response.status, body);
     }
+    return body;
+}
+function ingestConflictLatestSequence(error) {
+    const candidate = error;
+    if (!candidate || candidate.status !== 409 || candidate.body?.conflict !== true) {
+        return null;
+    }
+    const latestSequence = candidate.body.latestSequence;
+    return typeof latestSequence === "number" && Number.isInteger(latestSequence) && latestSequence >= 0 ? latestSequence : null;
 }
 export async function localTelemetryStatus(context, options = {}) {
     const statePath = options.statePath || localTelemetryStatePath(context.config.projectSlug);
@@ -606,9 +640,12 @@ export async function runLocalTelemetryService(context) {
     }
 }
 function requireDashboardTelemetryConfig(context) {
-    if (!context.config.dashboard.endpoint || !context.config.dashboard.token) {
-        throw new Error(`Telemetry requires AGENT_RUNNER_DASHBOARD_ENDPOINT and ${context.config.dashboard.tokenEnv}.`);
+    if (!context.config.dashboard.endpoint || !hasDashboardAuth(context.config.dashboard)) {
+        throw new Error(`Telemetry requires AGENT_RUNNER_DASHBOARD_ENDPOINT and either ${context.config.dashboard.tokenEnv} or AGENT_RUNNER_CF_ACCESS_CLIENT_ID/AGENT_RUNNER_CF_ACCESS_CLIENT_SECRET.`);
     }
+}
+function hasDashboardAuth(dashboard) {
+    return Boolean(dashboard.token || (dashboard.accessClientId && dashboard.accessClientSecret));
 }
 function defaultSourceId(sourceKind, projectSlug) {
     const host = process.env.CODESPACE_NAME || os.hostname();
@@ -752,15 +789,22 @@ function summarizeCodexJsonl(lines) {
             latestActivity = `Command: ${truncateUtf8(item.command || "", 120).value}`;
         }
         collectFileReferences(event, files);
-        const usage = event?.usage ?? event?.response?.usage;
+        const usage = event?.usage ??
+            event?.response?.usage ??
+            (event?.type === "event_msg" && event?.payload?.type === "token_count"
+                ? event?.payload?.info?.total_token_usage || event?.payload?.info?.last_token_usage
+                : null);
         if (usage && typeof usage === "object") {
             tokenUsage.inputTokens += finiteNumber(usage.input_tokens ?? usage.inputTokens);
             tokenUsage.cachedInputTokens += finiteNumber(usage.cached_input_tokens ?? usage.cachedInputTokens);
             tokenUsage.outputTokens += finiteNumber(usage.output_tokens ?? usage.outputTokens);
             tokenUsage.reasoningOutputTokens += finiteNumber(usage.reasoning_output_tokens ?? usage.reasoningOutputTokens);
+            tokenUsage.totalTokens += finiteNumber(usage.total_tokens ?? usage.totalTokens ?? usage.tokens);
         }
     }
-    tokenUsage.totalTokens = tokenUsage.inputTokens + tokenUsage.outputTokens;
+    if (!tokenUsage.totalTokens) {
+        tokenUsage.totalTokens = tokenUsage.inputTokens + tokenUsage.outputTokens;
+    }
     return {
         title: promptSnippets[0] ? truncateUtf8(promptSnippets[0], 120).value : undefined,
         status,

@@ -59,10 +59,12 @@ export interface SpendEstimate extends TokenUsage {
     elapsedMinutes: number | null;
     digitalOceanHourlyUsd: number | null;
     digitalOceanCostUsd: number | null;
-    digitalOceanConfidence: string;
+    digitalOceanMethod: "allocated" | "unknown";
     codexSubscriptionMonthlyUsd: number | null;
     codexSubscriptionSeatMultiplier: number;
+    codexSubscriptionPriceMethod: "measured" | "estimated";
     codexWeeklyBudgetUsd: number | null;
+    codexWeeklyBudgetFormula: string | null;
     codexSubscriptionMonthlyTokens: number | null;
     codexWeeklyTokenAllowance: number | null;
     codexObservedWeeklyTokens: number | null;
@@ -70,11 +72,12 @@ export interface SpendEstimate extends TokenUsage {
     codexTokenCostUsd: number | null;
     codexTaskAllocationPercent: number | null;
     codexRemainingWeeklyBudgetUsd: number | null;
-    codexAllocationConfidence: string;
+    codexAllocationMethod: "measured" | "estimated" | "unknown";
     codexAllocationSource: string;
+    codexCostMethod: "measured" | "estimated" | "unknown";
+    codexCostSource: string;
     totalOperationalCostUsd: number | null;
     totalEstimatedCostUsd: number | null;
-    confidence: string;
 }
 export interface GoalSummary {
     id: string;

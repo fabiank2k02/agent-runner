@@ -31,6 +31,7 @@ describe("devcontainer telemetry autostart", () => {
     expect(result.installed).toBe(true);
     expect(result.changed).toBe(true);
     expect(config.postStartCommand[telemetryAutostartKey]).toContain("telemetry start");
+    expect(config.postStartCommand[telemetryAutostartKey]).toContain("telemetry processor start");
     expect(config.postStartCommand[telemetryAutostartKey]).toContain("|| true");
 
     const second = await installDevcontainerTelemetryAutostart(root);
@@ -44,6 +45,7 @@ describe("devcontainer telemetry autostart", () => {
       [preservedPostStartKey]: "npm run dev:prepare"
     });
     expect((updated.postStartCommand as Record<string, string>)[telemetryAutostartKey]).toContain("agent-runner");
+    expect((updated.postStartCommand as Record<string, string>)[telemetryAutostartKey]).toContain("telemetry processor start");
   });
 
   it("reports missing devcontainers without creating one", async () => {
@@ -63,6 +65,7 @@ describe("devcontainer telemetry autostart", () => {
     expect(result.created).toBe(true);
     expect(result.telemetryAutostart?.installed).toBe(true);
     expect(config.postStartCommand[telemetryAutostartKey]).toContain("telemetry start");
+    expect(config.postStartCommand[telemetryAutostartKey]).toContain("telemetry processor start");
   });
 });
 

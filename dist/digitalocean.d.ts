@@ -28,10 +28,33 @@ export interface DigitalOceanDroplet {
         }>;
     };
 }
+export interface DigitalOceanSnapshot {
+    id: string | number;
+    name: string;
+    resource_id: string | number;
+    resource_type: "droplet" | "volume" | string;
+    min_disk_size: number;
+    size_gigabytes: number;
+    created_at: string;
+    regions: string[];
+    tags?: string[];
+}
 export interface DigitalOceanSize {
     slug: string;
     price_monthly: number;
     price_hourly: number;
+}
+export interface DigitalOceanAction {
+    id: number;
+    status: "in-progress" | "completed" | "errored" | string;
+    type: string;
+    started_at?: string;
+    completed_at?: string | null;
+    resource_id?: string | number | null;
+    resource_type?: string | null;
+    region?: {
+        slug: string;
+    } | null;
 }
 export declare class DigitalOceanApiError extends Error {
     readonly status: number;
@@ -54,8 +77,12 @@ export declare class DigitalOceanClient {
         sshKeys: Array<string | number>;
         tags: string[];
     }): Promise<DigitalOceanDroplet>;
+    listDropletSnapshots(): Promise<DigitalOceanSnapshot[]>;
+    createDropletSnapshot(dropletId: number, name: string): Promise<DigitalOceanAction>;
+    getDropletAction(dropletId: number, actionId: number): Promise<DigitalOceanAction>;
     getDroplet(id: number): Promise<DigitalOceanDroplet>;
     deleteDroplet(id: number): Promise<void>;
+    deleteSnapshot(id: string | number): Promise<void>;
     private request;
 }
 export declare function publicIpv4(droplet: DigitalOceanDroplet): string | undefined;

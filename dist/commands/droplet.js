@@ -1,11 +1,12 @@
 import { bootstrap } from "./bootstrap.js";
 import { DigitalOceanClient, isDigitalOceanNotFound, publicIpv4 } from "../digitalocean.js";
-import { readDigitalOceanState, stateAfterDestroy, stateWithActiveDroplet, writeDigitalOceanState } from "../infra-state.js";
+import { readDigitalOceanState, stateAfterDestroy, stateWithActiveDroplet, stateWithLifecycleTimings, stateWithProjectSnapshot, stateWithSnapshotCleanup, writeDigitalOceanState } from "../infra-state.js";
 import { resolveLayout } from "../paths.js";
 import { SshRemoteClient } from "../remote.js";
 import { RealShellExecutor } from "../shell.js";
 import { ensureManagedSshKey } from "../ssh-key.js";
 const defaultTimeoutMs = 10 * 60 * 1000;
+const snapshotTimeoutMs = 30 * 60 * 1000;
 export async function createDroplet(config, options = {}, executor = new RealShellExecutor()) {
     const client = createClient(config);
     const state = await readDigitalOceanState(config.projectSlug);
@@ -14,7 +15,12 @@ export async function createDroplet(config, options = {}, executor = new RealShe
     const name = options.name ?? config.digitalOcean.dropletName;
     const region = options.region ?? config.digitalOcean.region;
     const size = options.size ?? config.digitalOcean.size;
-    const image = options.image ?? config.digitalOcean.image;
+    const projectSnapshot = options.image === undefined && options.useProjectSnapshot !== false
+        ? await findReusableProjectSnapshot(client, config.projectSlug, state)
+        : undefined;
+    let image = options.image ?? projectSnapshot?.id ?? config.digitalOcean.image;
+    let snapshotFallbackError;
+    const timings = {};
     const hourlyPriceUsd = await client.getSize(size).then((result) => result?.price_hourly).catch(() => undefined);
     if (state?.activeDroplet) {
         const refresh = await refreshManagedDroplet(config);
@@ -22,15 +28,35 @@ export async function createDroplet(config, options = {}, executor = new RealShe
             throw new Error(`A managed droplet is already active (${state.activeDroplet.id}, ${state.activeDroplet.ip}). Run droplet destroy first.`);
         }
     }
-    const droplet = await client.createDroplet({
-        name,
-        region,
-        size,
-        image,
-        sshKeys: [accountKey.id],
-        tags: config.digitalOcean.tags
-    });
+    const createTiming = startPhase();
+    let droplet;
+    try {
+        droplet = await client.createDroplet({
+            name,
+            region,
+            size,
+            image,
+            sshKeys: [accountKey.id],
+            tags: config.digitalOcean.tags
+        });
+    }
+    catch (error) {
+        if (!projectSnapshot) {
+            throw error;
+        }
+        snapshotFallbackError = error instanceof Error ? error.message : String(error);
+        image = options.image ?? config.digitalOcean.image;
+        droplet = await client.createDroplet({
+            name,
+            region,
+            size,
+            image,
+            sshKeys: [accountKey.id],
+            tags: config.digitalOcean.tags
+        });
+    }
     const active = await waitForDropletReady(client, droplet.id);
+    timings.createRequestToDropletActive = finishPhase(createTiming);
     const ip = publicIpv4(active);
     if (!ip) {
         throw new Error(`Droplet ${active.id} became active without a public IPv4 address.`);
@@ -43,6 +69,12 @@ export async function createDroplet(config, options = {}, executor = new RealShe
         size,
         hourlyPriceUsd,
         image,
+        ...(projectSnapshot && !snapshotFallbackError
+            ? {
+                snapshotSourceId: projectSnapshot.id,
+                snapshotSourceName: projectSnapshot.name
+            }
+            : {}),
         user: "root",
         sshKeyPath: sshKey.privateKeyPath,
         sshKeyId: accountKey.id,
@@ -51,9 +83,13 @@ export async function createDroplet(config, options = {}, executor = new RealShe
     await writeDigitalOceanState(stateWithActiveDroplet(config.projectSlug, activeDroplet, state));
     const managedConfig = configForActiveDroplet(config, activeDroplet);
     const remote = new SshRemoteClient(managedConfig, executor);
+    const sshTiming = startPhase();
     await waitForSsh(remote);
+    timings.dropletActiveToSshReady = finishPhase(sshTiming);
     let bootstrapped = false;
-    if (!options.skipBootstrap) {
+    const skipBootstrap = options.skipBootstrap || Boolean(projectSnapshot && !snapshotFallbackError);
+    if (!skipBootstrap) {
+        const bootstrapTiming = startPhase();
         await bootstrap({
             config: managedConfig,
             layout: resolveLayout(managedConfig),
@@ -61,8 +97,19 @@ export async function createDroplet(config, options = {}, executor = new RealShe
             remote,
             dryRun: false
         });
+        timings.sshReadyToBootstrapComplete = finishPhase(bootstrapTiming);
         bootstrapped = true;
     }
+    else {
+        timings.sshReadyToBootstrapComplete = {
+            skipped: true,
+            startedAt: new Date().toISOString(),
+            finishedAt: new Date().toISOString(),
+            durationMs: 0
+        };
+    }
+    const latestState = await readDigitalOceanState(config.projectSlug);
+    await writeDigitalOceanState(stateWithLifecycleTimings(config.projectSlug, timings, "startup", latestState));
     return {
         dropletId: activeDroplet.id,
         name: activeDroplet.name,
@@ -70,21 +117,39 @@ export async function createDroplet(config, options = {}, executor = new RealShe
         region: activeDroplet.region,
         size: activeDroplet.size,
         image: activeDroplet.image,
-        bootstrapped
+        bootstrapped,
+        snapshotUsed: Boolean(projectSnapshot && !snapshotFallbackError),
+        snapshotId: projectSnapshot && !snapshotFallbackError ? projectSnapshot.id : undefined,
+        snapshotName: projectSnapshot && !snapshotFallbackError ? projectSnapshot.name : undefined,
+        snapshotFallbackError,
+        timings
     };
 }
 export async function dropletStatus(config) {
     const refresh = await refreshManagedDroplet(config);
+    const state = await readDigitalOceanState(config.projectSlug);
     if (!refresh.active) {
         return {
             active: false,
             staleCleared: refresh.staleCleared,
-            staleDroplet: refresh.staleDroplet
+            staleDroplet: refresh.staleDroplet,
+            projectSnapshot: state?.projectSnapshot,
+            previousSnapshot: state?.previousSnapshot,
+            lastFinalSnapshot: state?.lastFinalSnapshot,
+            lastStartupTimings: state?.lastStartupTimings,
+            lastFinishTimings: state?.lastFinishTimings,
+            lastCleanup: state?.lastCleanup
         };
     }
     return {
         active: true,
-        droplet: refresh.droplet
+        droplet: refresh.droplet,
+        projectSnapshot: state?.projectSnapshot,
+        previousSnapshot: state?.previousSnapshot,
+        lastFinalSnapshot: state?.lastFinalSnapshot,
+        lastStartupTimings: state?.lastStartupTimings,
+        lastFinishTimings: state?.lastFinishTimings,
+        lastCleanup: state?.lastCleanup
     };
 }
 export async function destroyDroplet(config, options = {}) {
@@ -104,18 +169,80 @@ export async function destroyDroplet(config, options = {}) {
         if (!isDigitalOceanNotFound(error)) {
             throw error;
         }
-        await writeDigitalOceanState(stateAfterDestroy(config.projectSlug));
+        await writeDigitalOceanState(stateAfterDestroy(config.projectSlug, state));
         return {
             dropletId,
             destroyed: false,
             alreadyMissing: true
         };
     }
-    await writeDigitalOceanState(stateAfterDestroy(config.projectSlug));
+    await writeDigitalOceanState(stateAfterDestroy(config.projectSlug, state));
     return {
         dropletId,
         destroyed: true
     };
+}
+export async function createFinalProjectSnapshot(config, options = {}) {
+    const client = createClient(config);
+    const state = await readDigitalOceanState(config.projectSlug);
+    const activeDroplet = state?.activeDroplet;
+    const sourceDropletId = options.sourceDropletId ?? activeDroplet?.id;
+    if (!sourceDropletId) {
+        throw new Error("No active managed droplet is recorded for snapshot creation.");
+    }
+    const snapshotName = options.name ?? projectSnapshotName(config.projectSlug);
+    const snapshot = await createSnapshot(client, config.projectSlug, sourceDropletId, snapshotName, "project");
+    const nextState = {
+        ...stateWithProjectSnapshot(config.projectSlug, snapshot, state),
+        lastFinalSnapshot: snapshot
+    };
+    await writeDigitalOceanState(nextState);
+    const cleanup = await cleanupProjectSnapshots(config, { state: nextState });
+    return {
+        snapshot,
+        deletedSnapshotIds: cleanup.deletedSnapshotIds,
+        errors: cleanup.errors
+    };
+}
+export async function cleanupProjectSnapshots(config, options = {}) {
+    const client = createClient(config);
+    const state = options.state ?? await readDigitalOceanState(config.projectSlug);
+    const snapshots = await listManagedProjectSnapshots(client, config.projectSlug);
+    const keep = new Set();
+    if (state?.projectSnapshot?.id) {
+        keep.add(String(state.projectSnapshot.id));
+    }
+    if (options.keepPrevious !== false && state?.previousSnapshot?.id) {
+        keep.add(String(state.previousSnapshot.id));
+    }
+    const sorted = snapshots.sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
+    for (const snapshot of sorted) {
+        if (keep.size >= 2) {
+            break;
+        }
+        keep.add(String(snapshot.id));
+    }
+    const deletedSnapshotIds = [];
+    const errors = [];
+    for (const snapshot of sorted) {
+        if (keep.has(String(snapshot.id))) {
+            continue;
+        }
+        try {
+            await client.deleteSnapshot(snapshot.id);
+            deletedSnapshotIds.push(snapshot.id);
+        }
+        catch (error) {
+            errors.push(error instanceof Error ? error.message : String(error));
+        }
+    }
+    const latest = await readDigitalOceanState(config.projectSlug);
+    await writeDigitalOceanState(stateWithSnapshotCleanup(config.projectSlug, {
+        deletedSnapshotIds,
+        checkedAt: new Date().toISOString(),
+        errors
+    }, latest));
+    return { deletedSnapshotIds, errors };
 }
 export async function refreshManagedDroplet(config) {
     const state = await readDigitalOceanState(config.projectSlug);
@@ -144,7 +271,7 @@ export async function refreshManagedDroplet(config) {
         if (!isDigitalOceanNotFound(error)) {
             throw error;
         }
-        await writeDigitalOceanState(stateAfterDestroy(config.projectSlug));
+        await writeDigitalOceanState(stateAfterDestroy(config.projectSlug, state));
         return {
             active: false,
             staleCleared: true,
@@ -157,6 +284,76 @@ function createClient(config) {
         throw new Error("DIGITALOCEAN_TOKEN or AGENT_RUNNER_DO_TOKEN is required for droplet lifecycle commands.");
     }
     return new DigitalOceanClient({ token: config.digitalOcean.token });
+}
+async function findReusableProjectSnapshot(client, projectSlug, state) {
+    const snapshots = await listManagedProjectSnapshots(client, projectSlug);
+    if (state?.projectSnapshot?.id) {
+        const byState = snapshots.find((snapshot) => String(snapshot.id) === String(state.projectSnapshot?.id));
+        if (byState) {
+            return byState;
+        }
+    }
+    return snapshots
+        .filter((snapshot) => snapshot.name.includes("-project-"))
+        .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))[0];
+}
+async function listManagedProjectSnapshots(client, projectSlug) {
+    const prefix = snapshotPrefix(projectSlug);
+    const snapshots = await client.listDropletSnapshots();
+    return snapshots.filter((snapshot) => snapshot.name.startsWith(prefix));
+}
+async function createSnapshot(client, projectSlug, dropletId, name, role) {
+    const action = await client.createDropletSnapshot(dropletId, name);
+    await waitForActionComplete(client, dropletId, action);
+    const snapshot = await waitForSnapshotVisible(client, dropletId, name);
+    return {
+        id: snapshot.id,
+        name: snapshot.name,
+        projectSlug,
+        sourceDropletId: dropletId,
+        createdAt: snapshot.created_at,
+        role,
+        sizeGigabytes: snapshot.size_gigabytes
+    };
+}
+async function waitForActionComplete(client, dropletId, initialAction) {
+    const started = Date.now();
+    let action = initialAction;
+    while (Date.now() - started < snapshotTimeoutMs) {
+        if (action.status === "completed") {
+            return action;
+        }
+        if (action.status === "errored") {
+            throw new Error(`DigitalOcean action ${action.id} failed while creating snapshot.`);
+        }
+        await sleep(10_000);
+        action = await client.getDropletAction(dropletId, action.id);
+    }
+    throw new Error(`Timed out waiting for DigitalOcean action ${initialAction.id} to complete.`);
+}
+async function waitForSnapshotVisible(client, dropletId, name) {
+    const started = Date.now();
+    while (Date.now() - started < defaultTimeoutMs) {
+        const snapshots = await client.listDropletSnapshots();
+        const snapshot = snapshots.find((item) => item.name === name && String(item.resource_id) === String(dropletId) && item.resource_type === "droplet");
+        if (snapshot) {
+            return snapshot;
+        }
+        await sleep(5000);
+    }
+    throw new Error(`Snapshot ${name} was not visible after the snapshot action completed.`);
+}
+function projectSnapshotName(projectSlug, date = new Date()) {
+    return `${snapshotPrefix(projectSlug)}project-${timestampForName(date)}`;
+}
+function snapshotPrefix(projectSlug) {
+    return `agent-runner-${safeName(projectSlug)}-`;
+}
+function timestampForName(date) {
+    return date.toISOString().replace(/[-:]/gu, "").replace(/\..+$/u, "Z");
+}
+function safeName(value) {
+    return value.replace(/[^a-zA-Z0-9._-]+/gu, "-").replace(/^-+|-+$/gu, "").slice(0, 80) || "project";
 }
 async function ensureDigitalOceanSshKey(client, projectSlug, publicKey) {
     const keys = await client.listSshKeys();
@@ -206,5 +403,19 @@ function configForActiveDroplet(config, activeDroplet) {
 }
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function startPhase() {
+    return {
+        startedAt: new Date().toISOString(),
+        startedMs: Date.now()
+    };
+}
+function finishPhase(phase, error) {
+    return {
+        startedAt: phase.startedAt,
+        finishedAt: new Date().toISOString(),
+        durationMs: Math.max(0, Date.now() - phase.startedMs),
+        ...(error ? { error: error instanceof Error ? error.message : String(error) } : {})
+    };
 }
 //# sourceMappingURL=droplet.js.map

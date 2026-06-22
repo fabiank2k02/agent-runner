@@ -1,4 +1,5 @@
 import type { CommandContext } from "../context.js";
+import { type DashboardTestCleanupResult } from "../dashboard-cleanup.js";
 import { type DevcontainerTelemetryAutostartResult } from "../devcontainer-autostart.js";
 import { type ProcessorClientResult, type ProcessorServiceStartResult, type ProcessorServiceStopResult, type ProcessorStatusResult } from "../telemetry-processor.js";
 import { type LocalTelemetryFlushResult, type LocalTelemetryStatus, type TelemetryServiceStartResult, type TelemetryServiceStopResult } from "../telemetry.js";
@@ -15,3 +16,4 @@ export declare function telemetryProcessorStop(context: CommandContext): Promise
 export declare function telemetryProcessorStatus(context: CommandContext): Promise<ProcessorStatusResult>;
 export declare function telemetryProcessorRebuild(context: CommandContext, scope: Record<string, unknown>): Promise<ProcessorClientResult>;
 export declare function telemetryProcessorService(context: CommandContext): Promise<void>;
+export declare function telemetryCleanupLiveTest(context: CommandContext, prefix: string): Promise<DashboardTestCleanupResult>;

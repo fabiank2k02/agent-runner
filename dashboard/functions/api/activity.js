@@ -1,9 +1,12 @@
+import { authenticateApiRequest, cors, json } from "../_shared/auth.js";
+import { classifyJob } from "../_shared/job-truth.js";
+
 export async function onRequestOptions() {
   return cors(new Response(null, { status: 204 }));
 }
 
 export async function onRequestGet({ request, env }) {
-  const auth = authenticateRead(request, env);
+  const auth = authenticateApiRequest(request, env);
   if (auth) {
     return cors(json(auth.body, auth.status));
   }
@@ -14,7 +17,8 @@ export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
   const limit = Math.max(1, Math.min(100, Number.parseInt(url.searchParams.get("limit") || "40", 10)));
   const jobs = await env.DB.prepare(
-    `SELECT jobs.id, jobs.project_slug, jobs.task_id, jobs.status, jobs.updated_at, jobs.current_activity,
+    `SELECT jobs.id, jobs.project_slug, jobs.task_id, jobs.status, jobs.exit_code, jobs.started_at, jobs.last_seen_at,
+      jobs.updated_at, jobs.current_activity, jobs.summary_json, jobs.status_json,
       jobs.last_raw_telemetry_at, jobs.raw_chunk_count,
       ps.summary AS processed_summary, ps.latest_activity AS processed_latest_activity,
       ps.next_action AS processed_next_action, ps.processed_at AS processed_at
@@ -39,21 +43,26 @@ export async function onRequestGet({ request, env }) {
     .all();
 
   const items = [
-    ...(jobs.results || []).map((job) => ({
-      type: "runner-job",
-      label: "Runner job",
-      id: job.id,
-      projectSlug: job.project_slug,
-      title: job.task_id,
-      status: job.status,
-      activity: job.processed_latest_activity || job.current_activity,
-      processedSummary: job.processed_summary,
-      nextAction: job.processed_next_action,
-      processedAt: job.processed_at,
-      updatedAt: job.updated_at,
-      latestRawTelemetryAt: job.last_raw_telemetry_at,
-      rawChunkCount: job.raw_chunk_count || 0
-    })),
+    ...(jobs.results || []).map((job) => {
+      const truth = classifyJob(job, { env });
+      return {
+        type: "runner-job",
+        label: "Runner job",
+        id: job.id,
+        projectSlug: job.project_slug,
+        title: job.task_id,
+        status: truth.status,
+        reportedStatus: truth.reportedStatus,
+        truth,
+        activity: job.processed_latest_activity || job.current_activity,
+        processedSummary: job.processed_summary,
+        nextAction: job.processed_next_action,
+        processedAt: job.processed_at,
+        updatedAt: job.updated_at,
+        latestRawTelemetryAt: job.last_raw_telemetry_at,
+        rawChunkCount: job.raw_chunk_count || 0
+      };
+    }),
     ...(threads.results || []).map((thread) => ({
       type: thread.source_kind === "codex-ide-thread" ? "ide-thread" : thread.source_kind === "local-workspace" ? "workspace" : "cli-thread",
       label: thread.source_kind === "codex-ide-thread" ? "IDE thread" : thread.source_kind === "local-workspace" ? "Workspace telemetry" : "CLI thread",
@@ -74,40 +83,4 @@ export async function onRequestGet({ request, env }) {
     .slice(0, limit);
 
   return cors(json({ activity: items }));
-}
-
-function authenticateRead(request, env) {
-  if (request.headers.get("cf-access-jwt-assertion") || request.headers.get("cf-access-authenticated-user-email")) {
-    return null;
-  }
-
-  const expected = env.AGENT_RUNNER_DASHBOARD_TOKEN || env.AGENT_RUNNER_DASHBOARD_PREVIEW_TOKEN;
-  if (!expected) {
-    return { status: 500, body: { error: "AGENT_RUNNER_DASHBOARD_TOKEN is not configured" } };
-  }
-  const header = request.headers.get("authorization") || "";
-  const token = header.toLowerCase().startsWith("bearer ")
-    ? header.slice(7)
-    : request.headers.get("x-agent-runner-token") || "";
-  if (token !== expected) {
-    return { status: 401, body: { error: "Unauthorized" } };
-  }
-  return null;
-}
-
-function json(value, status = 200) {
-  return new Response(JSON.stringify(value), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store"
-    }
-  });
-}
-
-function cors(response) {
-  response.headers.set("access-control-allow-origin", "*");
-  response.headers.set("access-control-allow-methods", "GET,POST,OPTIONS");
-  response.headers.set("access-control-allow-headers", "authorization,content-type,x-agent-runner-token");
-  return response;
 }

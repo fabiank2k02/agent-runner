@@ -11,6 +11,8 @@ const taskStateSchema = z.object({
   logFile: z.string(),
   promptFile: z.string(),
   startedAt: z.string(),
+  artifactDirectory: z.string().optional(),
+  artifactManifestFile: z.string().optional(),
   dashboardObserverSessionName: z.string().optional(),
   dashboardSummaryFile: z.string().optional(),
   dashboardObserverLogFile: z.string().optional()

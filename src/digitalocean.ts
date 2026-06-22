@@ -24,10 +24,33 @@ export interface DigitalOceanDroplet {
   };
 }
 
+export interface DigitalOceanSnapshot {
+  id: string | number;
+  name: string;
+  resource_id: string | number;
+  resource_type: "droplet" | "volume" | string;
+  min_disk_size: number;
+  size_gigabytes: number;
+  created_at: string;
+  regions: string[];
+  tags?: string[];
+}
+
 export interface DigitalOceanSize {
   slug: string;
   price_monthly: number;
   price_hourly: number;
+}
+
+export interface DigitalOceanAction {
+  id: number;
+  status: "in-progress" | "completed" | "errored" | string;
+  type: string;
+  started_at?: string;
+  completed_at?: string | null;
+  resource_id?: string | number | null;
+  resource_type?: string | null;
+  region?: { slug: string } | null;
 }
 
 export class DigitalOceanApiError extends Error {
@@ -91,6 +114,27 @@ export class DigitalOceanClient {
     return data.droplet;
   }
 
+  async listDropletSnapshots(): Promise<DigitalOceanSnapshot[]> {
+    const data = await this.request<{ snapshots: DigitalOceanSnapshot[] }>(
+      "GET",
+      "/snapshots?resource_type=droplet&per_page=200"
+    );
+    return data.snapshots;
+  }
+
+  async createDropletSnapshot(dropletId: number, name: string): Promise<DigitalOceanAction> {
+    const data = await this.request<{ action: DigitalOceanAction }>("POST", `/droplets/${dropletId}/actions`, {
+      type: "snapshot",
+      name
+    });
+    return data.action;
+  }
+
+  async getDropletAction(dropletId: number, actionId: number): Promise<DigitalOceanAction> {
+    const data = await this.request<{ action: DigitalOceanAction }>("GET", `/droplets/${dropletId}/actions/${actionId}`);
+    return data.action;
+  }
+
   async getDroplet(id: number): Promise<DigitalOceanDroplet> {
     const data = await this.request<{ droplet: DigitalOceanDroplet }>("GET", `/droplets/${id}`);
     return data.droplet;
@@ -98,6 +142,10 @@ export class DigitalOceanClient {
 
   async deleteDroplet(id: number): Promise<void> {
     await this.request<void>("DELETE", `/droplets/${id}`);
+  }
+
+  async deleteSnapshot(id: string | number): Promise<void> {
+    await this.request<void>("DELETE", `/snapshots/${encodeURIComponent(String(id))}`);
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {

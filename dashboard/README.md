@@ -33,15 +33,15 @@ Deploy:
 npm run deploy
 ```
 
-The scripts accept either `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_TOKEN`.
+Use `CLOUDFLARE_TOKEN` for deploy and diagnostics. The scripts map it to Wrangler's token environment internally.
 
 ## Cloudflare Access
 
 Protect the human dashboard with Cloudflare Access:
 
 - `agent-runner-dashboard.pages.dev` should require the Cloudflare identity provider, ideally restricted to members of your Cloudflare account.
-- `agent-runner-dashboard.pages.dev/api/ingest` should be a more-specific bypass app, because runners authenticate with `AGENT_RUNNER_DASHBOARD_TOKEN`.
-- `GET /api/jobs` and `GET /api/jobs/:id` accept a Cloudflare Access-authenticated request, so the browser does not need a separate dashboard token.
+- `agent-runner-dashboard.pages.dev/api/*` should be a more-specific bypass app, because machine clients must receive JSON and authenticate inside Pages Functions.
+- API clients must send `AGENT_RUNNER_DASHBOARD_TOKEN` as a bearer token, or configured `CF-Access-Client-Id` and `CF-Access-Client-Secret` service-token headers.
 
 Local dev:
 

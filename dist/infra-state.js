@@ -10,16 +10,60 @@ const activeDropletSchema = z.object({
     size: z.string(),
     hourlyPriceUsd: z.number().optional(),
     image: z.union([z.string(), z.number()]),
+    snapshotSourceId: z.union([z.string(), z.number()]).optional(),
+    snapshotSourceName: z.string().optional(),
     user: z.string().default("root"),
     sshKeyPath: z.string(),
     sshKeyId: z.number().optional(),
     createdAt: z.string()
 });
+const managedSnapshotSchema = z.object({
+    id: z.union([z.string(), z.number()]),
+    name: z.string(),
+    projectSlug: z.string(),
+    sourceDropletId: z.number().optional(),
+    createdAt: z.string(),
+    role: z.enum(["project", "previous", "final"]),
+    sizeGigabytes: z.number().optional()
+});
+const phaseTimingSchema = z.object({
+    startedAt: z.string().optional(),
+    finishedAt: z.string().optional(),
+    durationMs: z.number().optional(),
+    skipped: z.boolean().optional(),
+    error: z.string().optional()
+});
+const lifecycleTimingsSchema = z
+    .object({
+    createRequestToDropletActive: phaseTimingSchema.optional(),
+    dropletActiveToSshReady: phaseTimingSchema.optional(),
+    sshReadyToBootstrapComplete: phaseTimingSchema.optional(),
+    projectSyncDuration: phaseTimingSchema.optional(),
+    devcontainerReadyDuration: phaseTimingSchema.optional(),
+    codexAppServerReadyDuration: phaseTimingSchema.optional(),
+    firstTelemetryIngestVisible: phaseTimingSchema.optional(),
+    totalStartCommandToAcceptedJob: phaseTimingSchema.optional(),
+    terminalStateToFinalSnapshotComplete: phaseTimingSchema.optional(),
+    finalSnapshotCompleteToDropletDestroyed: phaseTimingSchema.optional()
+})
+    .catchall(phaseTimingSchema);
 const digitalOceanStateSchema = z
     .object({
     version: z.literal(1),
     projectSlug: z.string(),
     activeDroplet: activeDropletSchema.optional(),
+    projectSnapshot: managedSnapshotSchema.optional(),
+    previousSnapshot: managedSnapshotSchema.optional(),
+    lastFinalSnapshot: managedSnapshotSchema.optional(),
+    lastStartupTimings: lifecycleTimingsSchema.optional(),
+    lastFinishTimings: lifecycleTimingsSchema.optional(),
+    lastCleanup: z
+        .object({
+        deletedSnapshotIds: z.array(z.union([z.string(), z.number()])).default([]),
+        checkedAt: z.string(),
+        errors: z.array(z.string()).default([])
+    })
+        .optional(),
     updatedAt: z.string()
 })
     .default({
@@ -58,14 +102,82 @@ export function stateWithActiveDroplet(projectSlug, activeDroplet, existing) {
         version: 1,
         projectSlug,
         activeDroplet,
+        projectSnapshot: existing?.projectSnapshot,
+        previousSnapshot: existing?.previousSnapshot,
+        lastFinalSnapshot: existing?.lastFinalSnapshot,
+        lastStartupTimings: existing?.lastStartupTimings,
+        lastFinishTimings: existing?.lastFinishTimings,
+        lastCleanup: existing?.lastCleanup,
         updatedAt: new Date().toISOString()
     };
 }
-export function stateAfterDestroy(projectSlug) {
+export function stateWithProjectSnapshot(projectSlug, projectSnapshot, existing) {
+    return {
+        version: 1,
+        projectSlug,
+        activeDroplet: existing?.activeDroplet,
+        projectSnapshot,
+        previousSnapshot: existing?.projectSnapshot,
+        lastFinalSnapshot: existing?.lastFinalSnapshot,
+        lastStartupTimings: existing?.lastStartupTimings,
+        lastFinishTimings: existing?.lastFinishTimings,
+        lastCleanup: existing?.lastCleanup,
+        updatedAt: new Date().toISOString()
+    };
+}
+export function stateWithLifecycleTimings(projectSlug, timings, kind, existing) {
+    return {
+        version: 1,
+        projectSlug,
+        activeDroplet: existing?.activeDroplet,
+        projectSnapshot: existing?.projectSnapshot,
+        previousSnapshot: existing?.previousSnapshot,
+        lastFinalSnapshot: existing?.lastFinalSnapshot,
+        lastStartupTimings: kind === "startup" ? timings : existing?.lastStartupTimings,
+        lastFinishTimings: kind === "finish" ? timings : existing?.lastFinishTimings,
+        lastCleanup: existing?.lastCleanup,
+        updatedAt: new Date().toISOString()
+    };
+}
+export function stateWithSnapshotCleanup(projectSlug, cleanup, existing) {
+    return {
+        version: 1,
+        projectSlug,
+        activeDroplet: existing?.activeDroplet,
+        projectSnapshot: existing?.projectSnapshot,
+        previousSnapshot: existing?.previousSnapshot,
+        lastFinalSnapshot: existing?.lastFinalSnapshot,
+        lastStartupTimings: existing?.lastStartupTimings,
+        lastFinishTimings: existing?.lastFinishTimings,
+        lastCleanup: cleanup,
+        updatedAt: new Date().toISOString()
+    };
+}
+export function stateWithFinalSnapshot(projectSlug, finalSnapshot, existing) {
+    return {
+        version: 1,
+        projectSlug,
+        activeDroplet: existing?.activeDroplet,
+        projectSnapshot: existing?.projectSnapshot,
+        previousSnapshot: existing?.previousSnapshot,
+        lastFinalSnapshot: finalSnapshot,
+        lastStartupTimings: existing?.lastStartupTimings,
+        lastFinishTimings: existing?.lastFinishTimings,
+        lastCleanup: existing?.lastCleanup,
+        updatedAt: new Date().toISOString()
+    };
+}
+export function stateAfterDestroy(projectSlug, existing) {
     return {
         version: 1,
         projectSlug,
         activeDroplet: undefined,
+        projectSnapshot: existing?.projectSnapshot,
+        previousSnapshot: existing?.previousSnapshot,
+        lastFinalSnapshot: existing?.lastFinalSnapshot,
+        lastStartupTimings: existing?.lastStartupTimings,
+        lastFinishTimings: existing?.lastFinishTimings,
+        lastCleanup: existing?.lastCleanup,
         updatedAt: new Date().toISOString()
     };
 }

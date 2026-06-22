@@ -1,4 +1,10 @@
+import { authenticateApiRequest, cors, json } from "../_shared/auth.js";
 import { runProcessor } from "../_shared/processor.js";
+import {
+  accountUsageSnapshotFromEnvelope,
+  extractStreamTokenUsage,
+  normalizeTokenUsage as normalizeUsageTokens
+} from "../_shared/usage.js";
 
 const MAX_LOG_TAIL_CHARS = 100000;
 const MAX_INLINE_JSON_CHARS = 8192;
@@ -12,7 +18,7 @@ export async function onRequestOptions() {
 }
 
 export async function onRequestGet({ request, env }) {
-  const auth = authenticate(request, env);
+  const auth = authenticateApiRequest(request, env);
   if (auth) {
     return cors(json(auth.body, auth.status));
   }
@@ -38,7 +44,7 @@ export async function onRequestGet({ request, env }) {
 }
 
 export async function onRequestPost({ request, env, waitUntil }) {
-  const auth = authenticate(request, env);
+  const auth = authenticateApiRequest(request, env);
   if (auth) {
     return cors(json(auth.body, auth.status));
   }
@@ -186,6 +192,16 @@ async function handleRawTelemetry(payload, env, now, waitUntil) {
       });
     }
 
+    const latest = await env.DB.prepare(
+      `SELECT MAX(sequence) AS latest_sequence
+       FROM telemetry_chunks
+       WHERE stream_id = ?`
+    )
+      .bind(streamDbId)
+      .first();
+    const latestSequence = Number.isFinite(Number(latest?.latest_sequence))
+      ? Number(latest.latest_sequence)
+      : envelope.sequence;
     const conflictId = `conflict:${streamDbId}:${envelope.sequence}:${sha256.slice(0, 16)}`;
     await env.DB.prepare(
       `INSERT OR IGNORE INTO telemetry_conflicts (
@@ -214,6 +230,7 @@ async function handleRawTelemetry(payload, env, now, waitUntil) {
         conflict: true,
         streamId: streamDbId,
         sequence: envelope.sequence,
+        latestSequence,
         existingSha256: existing.sha256,
         receivedSha256: sha256
       },
@@ -456,8 +473,13 @@ async function maybeWakeProcessor(env, projectSlug, now) {
 }
 
 async function storeAccountUsageSnapshot(env, envelope, sourceDbId, chunkId, sha256, now) {
-  const accountUsage = envelope.payload?.accountUsage || envelope.payload?.codexAccountStatus;
-  if (!accountUsage || typeof accountUsage !== "object" || Array.isArray(accountUsage)) {
+  const accountUsage = accountUsageSnapshotFromEnvelope(envelope, {
+    sourceId: sourceDbId,
+    chunkId,
+    sha256,
+    now
+  });
+  if (!accountUsage) {
     return;
   }
   const collectedAt = nullableString(accountUsage.collectedAt) || envelope.generatedAt || now;
@@ -473,15 +495,12 @@ async function storeAccountUsageSnapshot(env, envelope, sourceDbId, chunkId, sha
       envelope.projectSlug,
       sourceDbId,
       collectedAt,
-      JSON.stringify(accountUsage.weeklyRemaining || accountUsage.weekly_remaining || null),
-      JSON.stringify(accountUsage.rolling5hRemaining || accountUsage.rolling_5h_remaining || accountUsage.rollingFiveHourRemaining || null),
-      JSON.stringify(normalizeTokenUsage(accountUsage.tokenUsage || accountUsage.token_usage || {})),
-      JSON.stringify(accountUsage.reset || accountUsage.resets || {}),
+      JSON.stringify(accountUsage.weeklyRemaining || null),
+      JSON.stringify(accountUsage.rolling5hRemaining || null),
+      JSON.stringify(normalizeUsageTokens(accountUsage.tokenUsage || {})),
+      JSON.stringify(accountUsage.reset || {}),
       JSON.stringify({
-        sourceEnvironment: accountUsage.sourceEnvironment || accountUsage.source_environment || null,
-        tierLabel: accountUsage.tierLabel || accountUsage.tier_label || accountUsage.accountTier || null,
-        modelUsage: accountUsage.modelUsage || accountUsage.model_usage || null,
-        source: "raw-telemetry",
+        ...(accountUsage.metadata || {}),
         chunkId
       })
     )
@@ -552,21 +571,6 @@ function normalizeRawEnvelope(payload, now) {
   };
 }
 
-function authenticate(request, env) {
-  const expected = env.AGENT_RUNNER_DASHBOARD_TOKEN || env.AGENT_RUNNER_DASHBOARD_PREVIEW_TOKEN;
-  if (!expected) {
-    return { status: 500, body: { error: "AGENT_RUNNER_DASHBOARD_TOKEN is not configured" } };
-  }
-  const header = request.headers.get("authorization") || "";
-  const token = header.toLowerCase().startsWith("bearer ")
-    ? header.slice(7)
-    : request.headers.get("x-agent-runner-token") || "";
-  if (token !== expected) {
-    return { status: 401, body: { error: "Unauthorized" } };
-  }
-  return null;
-}
-
 function normalizeStatus(value) {
   const status = value && typeof value === "object" ? value : {};
   return {
@@ -605,10 +609,12 @@ function normalizeCost(value) {
     elapsedMinutes: nullableNumber(cost.elapsedMinutes, 0),
     digitalOceanHourlyUsd: nullableNumber(cost.digitalOceanHourlyUsd, 0),
     digitalOceanCostUsd: nullableNumber(cost.digitalOceanCostUsd, 0),
-    digitalOceanConfidence: truncate(typeof cost.digitalOceanConfidence === "string" ? cost.digitalOceanConfidence : "unknown", 60),
+    digitalOceanMethod: truncate(typeof cost.digitalOceanMethod === "string" ? cost.digitalOceanMethod : "unknown", 60),
     codexSubscriptionMonthlyUsd: nullableNumber(cost.codexSubscriptionMonthlyUsd, 0),
     codexSubscriptionSeatMultiplier: nullableNumber(cost.codexSubscriptionSeatMultiplier, 0) ?? 1,
+    codexSubscriptionPriceMethod: truncate(typeof cost.codexSubscriptionPriceMethod === "string" ? cost.codexSubscriptionPriceMethod : "unknown", 60),
     codexWeeklyBudgetUsd: nullableNumber(cost.codexWeeklyBudgetUsd, 0),
+    codexWeeklyBudgetFormula: truncate(typeof cost.codexWeeklyBudgetFormula === "string" ? cost.codexWeeklyBudgetFormula : "", 160) || null,
     codexSubscriptionMonthlyTokens: nullableNumber(cost.codexSubscriptionMonthlyTokens, 0),
     codexWeeklyTokenAllowance: nullableNumber(cost.codexWeeklyTokenAllowance, 0),
     codexObservedWeeklyTokens: nullableNumber(cost.codexObservedWeeklyTokens, 0),
@@ -616,11 +622,13 @@ function normalizeCost(value) {
     codexTokenCostUsd: nullableNumber(cost.codexTokenCostUsd, 0),
     codexTaskAllocationPercent: nullableNumber(cost.codexTaskAllocationPercent, 0),
     codexRemainingWeeklyBudgetUsd: nullableNumber(cost.codexRemainingWeeklyBudgetUsd, 0),
-    codexAllocationConfidence: truncate(typeof cost.codexAllocationConfidence === "string" ? cost.codexAllocationConfidence : "unknown", 60),
+    codexAllocationMethod: truncate(typeof cost.codexAllocationMethod === "string" ? cost.codexAllocationMethod : "unknown", 60),
     codexAllocationSource: truncate(typeof cost.codexAllocationSource === "string" ? cost.codexAllocationSource : "unknown", 80),
+    codexCostMethod: truncate(typeof cost.codexCostMethod === "string" ? cost.codexCostMethod : "unknown", 60),
+    codexCostSource: truncate(typeof cost.codexCostSource === "string" ? cost.codexCostSource : "unknown", 80),
+    tokenUsageMethod: truncate(typeof cost.tokenUsageMethod === "string" ? cost.tokenUsageMethod : "unknown", 60),
     totalOperationalCostUsd: nullableNumber(cost.totalOperationalCostUsd, 0),
     totalEstimatedCostUsd: nullableNumber(cost.totalEstimatedCostUsd, 0),
-    confidence: truncate(typeof cost.confidence === "string" ? cost.confidence : "unknown", 60),
     totalTokens: nullableNumber(cost.totalTokens, 0),
     inputTokens: nullableNumber(cost.inputTokens, 0),
     cachedInputTokens: nullableNumber(cost.cachedInputTokens, 0),
@@ -743,12 +751,16 @@ function normalizeSubgoals(value) {
 
 function normalizeTokenUsage(value) {
   const usage = value && typeof value === "object" ? value : {};
+  const inputTokens = nullableNumber(usage.inputTokens ?? usage.input_tokens, 0) ?? 0;
+  const cachedInputTokens = nullableNumber(usage.cachedInputTokens ?? usage.cached_input_tokens, 0) ?? 0;
+  const outputTokens = nullableNumber(usage.outputTokens ?? usage.output_tokens, 0) ?? 0;
+  const reasoningOutputTokens = nullableNumber(usage.reasoningOutputTokens ?? usage.reasoning_output_tokens, 0) ?? 0;
   return {
-    inputTokens: nullableNumber(usage.inputTokens, 0) ?? 0,
-    cachedInputTokens: nullableNumber(usage.cachedInputTokens, 0) ?? 0,
-    outputTokens: nullableNumber(usage.outputTokens, 0) ?? 0,
-    reasoningOutputTokens: nullableNumber(usage.reasoningOutputTokens, 0) ?? 0,
-    totalTokens: nullableNumber(usage.totalTokens, 0) ?? 0
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+    totalTokens: nullableNumber(usage.totalTokens ?? usage.total_tokens ?? usage.tokens, 0) ?? inputTokens + outputTokens
   };
 }
 
@@ -858,14 +870,7 @@ function activityFromEnvelope(envelope) {
 function tokenUsageFromEnvelope(envelope) {
   const metadata = envelope.metadata || {};
   const payload = envelope.payload || {};
-  const usage =
-    metadata.tokenUsage ||
-    payload.tokenUsage ||
-    payload.thread?.tokenUsage ||
-    payload.codexJsonl?.tokenUsage ||
-    payload.summary?.cost ||
-    {};
-  return normalizeTokenUsage(usage);
+  return extractStreamTokenUsage(metadata, payload);
 }
 
 function linkedRunnerJobIdFromEnvelope(envelope) {
@@ -986,21 +991,4 @@ function stableId(value) {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(36);
-}
-
-function json(value, status = 200) {
-  return new Response(JSON.stringify(value), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store"
-    }
-  });
-}
-
-function cors(response) {
-  response.headers.set("access-control-allow-origin", "*");
-  response.headers.set("access-control-allow-methods", "GET,POST,OPTIONS");
-  response.headers.set("access-control-allow-headers", "authorization,content-type,x-agent-runner-token");
-  return response;
 }

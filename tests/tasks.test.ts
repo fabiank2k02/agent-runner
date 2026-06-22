@@ -14,7 +14,7 @@ describe("tasks", () => {
           { id: "sample:task-1" },
           { id: "sample:task-2" }
         ]
-      })))
+      }), { headers: { "content-type": "application/json" } }))
     );
   });
 
@@ -39,6 +39,7 @@ describe("tasks", () => {
     const state = JSON.parse(await fs.promises.readFile(layout.localStateFile, "utf8"));
 
     expect(result.sessionName).toBe(sessionName("sample", "task-1"));
+    expect(result.artifactManifestFile).toBe("~/agent-runner/projects/sample/.agent-runner/artifacts/task-1/manifest.json");
     expect(remote.writes.get("~/agent-runner/logs/sample/task-1.prompt.txt")).toBe("finish the feature");
     expect(remote.commands.some((command) => command.includes("tmux new-session"))).toBe(true);
     expect(remote.writes.get("~/agent-runner/logs/sample/task-1.run.sh")).toContain(
@@ -48,8 +49,17 @@ describe("tasks", () => {
       "--dangerously-bypass-approvals-and-sandbox"
     );
     expect(remote.writes.get("~/agent-runner/logs/sample/task-1.run.sh")).toContain("< /dev/null");
+    expect(remote.writes.get("~/agent-runner/logs/sample/task-1.run.sh")).toContain("ARTIFACT_MANIFEST_FILE=");
+    expect(remote.writes.get("~/agent-runner/logs/sample/task-1.run.sh")).toContain("artifactManifestFile");
+    expect(remote.writes.get("~/agent-runner/projects/sample/.agent-runner/tmp/task-1.app-server.mjs")).toContain(
+      "artifact.saved"
+    );
+    expect(remote.writes.get("~/agent-runner/projects/sample/.agent-runner/tmp/task-1.app-server.mjs")).toContain(
+      "imageGeneration"
+    );
     expect(state.lastTask.taskId).toBe("task-1");
     expect(state.lastTask.logFile).toBe("~/agent-runner/logs/sample/task-1.jsonl");
+    expect(state.lastTask.artifactManifestFile).toBe("~/agent-runner/projects/sample/.agent-runner/artifacts/task-1/manifest.json");
   });
 
   it("starts an isolated dashboard observer when dashboard reporting is enabled", async () => {

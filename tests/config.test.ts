@@ -89,6 +89,21 @@ describe("resolveConfig", () => {
     expect(config.dashboard.costs.codexObservedWeeklyTokens).toBe(19000000);
   });
 
+  it("supports Access service-token dashboard auth without requiring bearer token env", async () => {
+    const root = await tempDir("config-dashboard-access");
+    process.env.AGENT_RUNNER_DASHBOARD_ENDPOINT = "https://agent-runner.example.com/api/ingest";
+    delete process.env.AGENT_RUNNER_DASHBOARD_TOKEN;
+    process.env.AGENT_RUNNER_CF_ACCESS_CLIENT_ID = "access-client-id";
+    process.env.AGENT_RUNNER_CF_ACCESS_CLIENT_SECRET = "access-client-secret";
+
+    const config = resolveConfig(root);
+
+    expect(config.dashboard.enabled).toBe(true);
+    expect(config.dashboard.token).toBeUndefined();
+    expect(config.dashboard.accessClientId).toBe("access-client-id");
+    expect(config.dashboard.accessClientSecret).toBe("access-client-secret");
+  });
+
   it("lets project config disable dashboard reporting even when env is present", async () => {
     const root = await tempDir("config-dashboard-disabled");
     process.env.AGENT_RUNNER_DASHBOARD_ENDPOINT = "https://agent-runner.example.com/api/ingest";

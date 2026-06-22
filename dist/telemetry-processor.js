@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { dashboardAuthHeaders, readDashboardJson } from "./dashboard-api.js";
 const defaultProcessorIntervalSeconds = 60;
 export function dashboardProcessorUrl(endpoint) {
     const url = new URL(endpoint);
@@ -53,11 +54,9 @@ export async function processorRemoteStatus(context) {
     const url = new URL(dashboardProcessorUrl(context.config.dashboard.endpoint));
     url.searchParams.set("projectSlug", context.config.projectSlug);
     const response = await fetch(url, {
-        headers: {
-            authorization: `Bearer ${context.config.dashboard.token}`
-        }
+        headers: dashboardAuthHeaders(context.config.dashboard)
     });
-    const body = (await response.json().catch(() => ({})));
+    const { body } = await readDashboardJson(response, "processor status");
     if (!response.ok) {
         throw new Error(body?.error || `processor status failed: ${response.status}`);
     }
@@ -184,22 +183,22 @@ async function callProcessor(context, payload) {
     requireDashboardProcessorConfig(context);
     const response = await fetch(dashboardProcessorUrl(context.config.dashboard.endpoint), {
         method: "POST",
-        headers: {
-            authorization: `Bearer ${context.config.dashboard.token}`,
-            "content-type": "application/json"
-        },
+        headers: dashboardAuthHeaders(context.config.dashboard, { contentType: true }),
         body: JSON.stringify(payload)
     });
-    const body = (await response.json().catch(() => ({})));
+    const { body } = await readDashboardJson(response, "processor request");
     if (!response.ok) {
         throw new Error(String(body?.error || `processor request failed: ${response.status}`));
     }
     return body;
 }
 function requireDashboardProcessorConfig(context) {
-    if (!context.config.dashboard.endpoint || !context.config.dashboard.token) {
-        throw new Error(`Telemetry processor requires AGENT_RUNNER_DASHBOARD_ENDPOINT and ${context.config.dashboard.tokenEnv}.`);
+    if (!context.config.dashboard.endpoint || !hasDashboardAuth(context.config.dashboard)) {
+        throw new Error(`Telemetry processor requires AGENT_RUNNER_DASHBOARD_ENDPOINT and either ${context.config.dashboard.tokenEnv} or AGENT_RUNNER_CF_ACCESS_CLIENT_ID/AGENT_RUNNER_CF_ACCESS_CLIENT_SECRET.`);
     }
+}
+function hasDashboardAuth(dashboard) {
+    return Boolean(dashboard.token || (dashboard.accessClientId && dashboard.accessClientSecret));
 }
 function processorStateDir(projectSlug) {
     return path.join(os.homedir(), ".agent-runner", "telemetry", projectSlug);

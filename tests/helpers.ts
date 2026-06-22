@@ -30,6 +30,8 @@ export function fakeConfig(projectRoot: string): ResolvedConfig {
       approval: "never",
       reasoningEffort: "xhigh",
       yolo: true,
+      execution: "app-server",
+      allowExecFallback: false,
       extraArgs: []
     },
     rsync: {
@@ -45,7 +47,9 @@ export function fakeConfig(projectRoot: string): ResolvedConfig {
       image: "ubuntu-24-04-x64",
       dropletName: "agent-runner-sample",
       tags: [],
-      hourlyPriceUsd: undefined
+      hourlyPriceUsd: undefined,
+      snapshotSourceId: undefined,
+      snapshotSourceName: undefined
     },
     dashboard: {
       enabled: true,

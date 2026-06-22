@@ -1,4 +1,5 @@
 import type { CommandContext } from "../context.js";
+import { cleanupDashboardLiveTestData, type DashboardTestCleanupResult } from "../dashboard-cleanup.js";
 import {
   devcontainerTelemetryAutostartStatus,
   installDevcontainerTelemetryAutostart,
@@ -78,4 +79,8 @@ export async function telemetryProcessorRebuild(context: CommandContext, scope: 
 
 export async function telemetryProcessorService(context: CommandContext): Promise<void> {
   await runProcessorService(context);
+}
+
+export async function telemetryCleanupLiveTest(context: CommandContext, prefix: string): Promise<DashboardTestCleanupResult> {
+  return cleanupDashboardLiveTestData(context, prefix);
 }

@@ -1,7 +1,8 @@
 const tokenKey = "agent-runner-dashboard-token";
 const state = {
   token: localStorage.getItem(tokenKey) || "",
-  view: "jobs",
+  sessionToken: "",
+  view: "now",
   jobs: [],
   threads: [],
   activity: [],
@@ -27,6 +28,7 @@ const state = {
 const elements = {
   refreshButton: document.querySelector("#refresh-button"),
   viewTabs: document.querySelector(".view-tabs"),
+  workspace: document.querySelector(".workspace"),
   jobs: document.querySelector("#jobs"),
   detail: document.querySelector("#detail"),
   lastUpdated: document.querySelector("#last-updated"),
@@ -161,28 +163,57 @@ async function loadThreadDetail(id, options = {}) {
 
 async function api(path) {
   const headers = {};
-  if (state.token) {
-    headers.authorization = "Bearer " + state.token;
+  const token = state.token || state.sessionToken;
+  if (token) {
+    headers.authorization = "Bearer " + token;
   }
   const response = await fetch(path, { headers });
   const data = await response.json().catch(() => ({}));
+  if (response.status === 401 && !state.token && !state.sessionToken) {
+    const loaded = await loadAccessSessionToken();
+    if (loaded) {
+      return api(path);
+    }
+  }
   if (!response.ok) {
     throw new Error(data.error || response.statusText);
   }
   return data;
 }
 
+async function loadAccessSessionToken() {
+  try {
+    const response = await fetch("/session/token", {
+      headers: { accept: "application/json" }
+    });
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      window.location.assign("/");
+      return false;
+    }
+    const data = await response.json().catch(() => ({}));
+    if (response.ok && data?.token) {
+      state.sessionToken = data.token;
+      return true;
+    }
+  } catch {
+    window.location.assign("/");
+  }
+  return false;
+}
+
 function render() {
   renderViewTabs();
+  elements.workspace.classList.toggle("now-mode", state.view === "now");
   renderMetrics();
-  if (state.view === "threads") {
+  if (state.view === "now") {
+    renderNow();
+  } else if (state.view === "threads") {
     renderThreads();
   } else if (state.view === "memory") {
     renderMemory();
   } else if (state.view === "processor") {
     renderProcessor();
-  } else if (state.view === "overview") {
-    renderOverview();
   } else {
     renderJobs();
   }
@@ -193,8 +224,8 @@ function render() {
   } else if (state.view === "threads" && !state.selectedThreadId) {
     elements.detail.className = "detail";
     elements.detail.innerHTML = state.loading ? detailSkeleton() : emptyState("No local threads", "Local Codex telemetry will appear after the local service uploads.");
-  } else if (state.view === "overview") {
-    renderOverviewDetail();
+  } else if (state.view === "now") {
+    renderNowDetail();
   } else if (state.view === "memory") {
     renderMemoryDetail();
   } else if (state.view === "processor") {
@@ -209,8 +240,9 @@ function renderViewTabs() {
 }
 
 function renderMetrics() {
+  const attention = attentionItems();
   elements.running.textContent = state.jobs.filter((job) => job.status === "running" && !job.isStuck).length;
-  elements.stuck.textContent = state.jobs.filter((job) => job.isStuck).length;
+  elements.stuck.textContent = attention.length;
   elements.completed.textContent = state.jobs.filter((job) => job.status === "completed").length;
   elements.failed.textContent = state.jobs.filter((job) => job.status === "failed").length;
 }
@@ -222,6 +254,132 @@ function renderFreshness() {
   }
   elements.lastUpdated.textContent = "Updated " + formatRefreshTime(state.lastUpdatedAt);
   elements.lastUpdated.title = state.lastUpdatedAt.toISOString();
+}
+
+function renderNow() {
+  elements.listEyebrow.textContent = "Surface";
+  elements.listTitle.textContent = "Now";
+  const items = surfaceItems();
+  elements.jobCount.textContent = `${items.length} active`;
+
+  if (state.loading && !items.length) {
+    elements.jobs.innerHTML = nowSkeleton();
+    return;
+  }
+  if (state.error && !items.length) {
+    elements.jobs.innerHTML = errorState(state.error.message || String(state.error), "Unable to load Now");
+    return;
+  }
+  if (!items.length) {
+    elements.jobs.innerHTML = `
+      <section class="now-hero empty-now">
+        <span class="now-glyph" aria-hidden="true"></span>
+        <div>
+          <p class="eyebrow">Now</p>
+          <h2>No active runner or local thread.</h2>
+          <p>Completed jobs, local threads, memory, processor status, and raw inspect data remain available in the tabs.</p>
+        </div>
+      </section>
+    `;
+    return;
+  }
+
+  const primary = items[0];
+  const activeRunner = items.filter((item) => item.kind === "runner-job" && !terminalStatuses().has(item.raw.status));
+  const activeLocal = items.filter((item) => item.kind !== "runner-job" && !terminalStatuses().has(item.raw.status));
+  const projects = projectGroups(items);
+
+  elements.jobs.innerHTML = `
+    <section class="now-hero status-${escapeAttribute(primary.className)}">
+      <span class="now-glyph" aria-hidden="true"></span>
+      <div class="now-copy">
+        <p class="eyebrow">Now</p>
+        <h2>${escapeHtml(nowStatement(primary))}</h2>
+        <div class="now-steps" aria-label="Current state">
+          ${["thinking", "editing", "waiting", "blocked", "done"].map((step) => `
+            <span class="${primary.nowStatus === step || (step === "done" && primary.nowStatus === "completed") ? "active" : ""}">
+              <i aria-hidden="true"></i>${escapeHtml(formatStatus(step))}
+            </span>
+          `).join("")}
+        </div>
+      </div>
+      <button type="button" class="now-action" data-now-kind="${escapeAttribute(primary.kind)}" data-now-id="${escapeAttribute(primary.id)}">View</button>
+    </section>
+
+    <section class="now-group-head">
+      <div>
+        <p class="eyebrow">Active</p>
+        <h2>Runner Jobs</h2>
+      </div>
+      <span>${escapeHtml(activeRunner.length)}</span>
+    </section>
+    <div class="now-card-grid">
+      ${activeRunner.length ? activeRunner.map(nowCard).join("") : emptyInline("No active runner jobs.")}
+    </div>
+
+    <section class="now-group-head">
+      <div>
+        <p class="eyebrow">Local</p>
+        <h2>Codex Threads</h2>
+      </div>
+      <span>${escapeHtml(activeLocal.length)}</span>
+    </section>
+    <div class="now-card-grid">
+      ${activeLocal.length ? activeLocal.map(nowCard).join("") : emptyInline("No active local threads.")}
+    </div>
+
+    <section class="project-strip" aria-label="Project groups">
+      ${projects.map((project) => `
+        <button type="button" class="project-chip" data-project="${escapeAttribute(project.slug)}">
+          <strong>${escapeHtml(project.slug)}</strong>
+          <span>${escapeHtml(project.runner)} runner / ${escapeHtml(project.local)} local</span>
+        </button>
+      `).join("")}
+    </section>
+  `;
+
+  for (const button of elements.jobs.querySelectorAll("[data-now-id]")) {
+    button.addEventListener("click", () => openSurfaceItem(button.dataset.nowKind, button.dataset.nowId));
+  }
+}
+
+function renderNowDetail() {
+  const attention = attentionItems();
+  const usage = state.processorStatus?.accountUsage;
+  const processorWarnings = Array.isArray(state.processorStatus?.warnings) ? state.processorStatus.warnings : [];
+  elements.detail.className = "detail now-side";
+  elements.detail.innerHTML = `
+    <section class="side-panel attention-panel">
+      <div class="block-head">
+        <h3>Attention</h3>
+        <span>${escapeHtml(attention.length)}</span>
+      </div>
+      ${attention.length ? attention.slice(0, 8).map(attentionCard).join("") : emptyState("No attention items", "No stale, failed, blocked, timed-out, or unprocessed telemetry is visible.", { compact: true })}
+    </section>
+    <section class="side-panel usage-panel">
+      <div class="block-head">
+        <h3>Usage</h3>
+        <span>${escapeHtml(usage?.label || "snapshot")}</span>
+      </div>
+      ${usage ? usageMini(usage) : emptyState("No usage snapshot", "Usage cards will render after account status telemetry arrives.", { compact: true })}
+    </section>
+    <section class="side-panel processor-mini">
+      <div class="block-head">
+        <h3>Processor</h3>
+        <span>${escapeHtml(state.processorStatus?.automatic?.paused ? "paused" : "automatic")}</span>
+      </div>
+      <div class="mini-metrics">
+        <div><span>Pending</span><strong>${escapeHtml(state.processorStatus?.cursor?.pendingStreamCount ?? "unknown")}</strong></div>
+        <div><span>Behind</span><strong>${escapeHtml(state.processorStatus?.cursor?.behindBySequence ?? "unknown")}</strong></div>
+        <div><span>Streams</span><strong>${escapeHtml(state.processorStatus?.cursor?.streamCount ?? "unknown")}</strong></div>
+      </div>
+      ${processorWarnings.length ? eventsView(processorWarnings.map(warningEvent), new Set(), "No processor warnings.") : ""}
+    </section>
+  `;
+
+  for (const button of elements.detail.querySelectorAll("[data-attention-kind]")) {
+    button.addEventListener("click", () => openSurfaceItem(button.dataset.attentionKind, button.dataset.attentionId));
+  }
 }
 
 function renderJobs() {
@@ -502,7 +660,7 @@ function renderDetail(job, history, rawChunks = []) {
       </div>
       <div class="progress-readout">
         <strong>${escapeHtml(formatPercent(percent))}</strong>
-        <span>${escapeHtml(summary.progressConfidence ? summary.progressConfidence + " confidence" : "unknown confidence")}</span>
+        <span>${escapeHtml(progressSourceLabel(job))}</span>
       </div>
       <div class="progress large"><span style="width: ${percent}%"></span></div>
     </section>
@@ -726,10 +884,10 @@ function spendBlock(spend) {
         <div>
           <span>Weekly Codex Budget</span>
           <strong>${escapeHtml(formatUsd(spend.codexWeeklyBudgetUsd))}</strong>
-          <small>${escapeHtml(formatSeatLine(spend))}</small>
+          <small>${escapeHtml(spend.codexWeeklyBudgetFormula || formatSeatLine(spend))}</small>
         </div>
         <div>
-          <span>Task Codex Allocation</span>
+          <span>Task Codex Cost</span>
           <strong>${escapeHtml(formatUsd(spend.codexTaskAllocationUsd ?? spend.codexTokenCostUsd))}</strong>
           <small>${escapeHtml(formatAllocationShare(spend))}</small>
         </div>
@@ -779,36 +937,58 @@ function processedBlock(processed) {
 function accountUsageBlock(usage) {
   const latest = usage?.latest;
   if (!latest) {
-    return emptyPanel("Account Usage And Limits", "No Codex account status snapshot has arrived yet.");
+    return emptyPanel("Account Usage And Limits", "No Codex rate-limit or status snapshot has arrived yet. Weekly, 5h, burn, and cost cards will populate after account telemetry is ingested.");
   }
-  const weekly = latest.weeklyRemaining || {};
-  const rolling = latest.rolling5hRemaining || {};
+  const weekly = usage.weekly || latest.weeklyRemaining || {};
+  const rolling = usage.rolling5h || latest.rolling5hRemaining || {};
+  const burn = usage.burn || {};
+  const subscription = usage.subscription || {};
   return `
     <section class="block usage-block">
       <div class="block-head">
         <h3>Account Usage And Limits</h3>
-        <span>${escapeHtml(usage.label || "observed/estimated")}</span>
+        <span>${escapeHtml(usage.label || "unknown")}</span>
       </div>
       <div class="usage-grid">
         <div>
           <span>Weekly Remaining</span>
           <strong>${escapeHtml(formatLimitRemaining(weekly))}</strong>
-          <small>${escapeHtml(formatReset(latest.reset?.weeklyResetAt))}</small>
+          <small>${escapeHtml(formatResetAndMethod(weekly.resetAt || latest.reset?.weeklyResetAt, weekly.method))}</small>
+        </div>
+        <div>
+          <span>Weekly Used</span>
+          <strong>${escapeHtml(formatLimitUsed(weekly))}</strong>
+          <small>${escapeHtml(formatLimitTokens(weekly))}</small>
         </div>
         <div>
           <span>5-hour Remaining</span>
           <strong>${escapeHtml(formatLimitRemaining(rolling))}</strong>
-          <small>${escapeHtml(formatReset(latest.reset?.rolling5hResetAt))}</small>
+          <small>${escapeHtml(formatResetAndMethod(rolling.resetAt || latest.reset?.rolling5hResetAt, rolling.method))}</small>
         </div>
         <div>
-          <span>Last Hour Tokens</span>
-          <strong>${escapeHtml(formatNumber(usage.tokensLastHour))}</strong>
-          <small>${escapeHtml(`${formatNumber(usage.tokenBurnRatePerHour)} / hour`)}</small>
+          <span>5-hour Used</span>
+          <strong>${escapeHtml(formatLimitUsed(rolling))}</strong>
+          <small>${escapeHtml(formatLimitTokens(rolling))}</small>
         </div>
         <div>
-          <span>Today / Week</span>
-          <strong>${escapeHtml(`${formatNumber(usage.tokensToday)} / ${formatNumber(usage.tokensThisWeek)}`)}</strong>
+          <span>Burn Last Hour</span>
+          <strong>${escapeHtml(formatTokenBurn(burn.lastHour))}</strong>
+          <small>${escapeHtml(formatBurnRate(burn.lastHour))}</small>
+        </div>
+        <div>
+          <span>Burn 5h / Week</span>
+          <strong>${escapeHtml(`${formatTokenBurn(burn.rolling5h)} / ${formatTokenBurn(burn.week)}`)}</strong>
           <small>${escapeHtml(formatLimitEta(usage.estimatedHoursUntilLimit))}</small>
+        </div>
+        <div>
+          <span>Codex Weekly Budget</span>
+          <strong>${escapeHtml(formatUsd(subscription.weeklyBudgetUsd))}</strong>
+          <small>${escapeHtml(subscription.formula || "subscription formula unknown")}</small>
+        </div>
+        <div>
+          <span>Snapshot Count</span>
+          <strong>${escapeHtml(usage.snapshots?.length ?? 0)}</strong>
+          <small>${escapeHtml(formatTime(latest.collectedAt))}</small>
         </div>
       </div>
     </section>
@@ -1246,6 +1426,261 @@ function errorState(message, title) {
   `;
 }
 
+function surfaceItems() {
+  const jobs = state.jobs.map((job) => {
+    const telemetry = normalizedTelemetry(job);
+    const activity = job.processed?.latestActivity || telemetry?.currentActivity || job.summary?.currentActivity || job.currentActivity || "";
+    const nowStatus = deriveNowStatus(job.status, activity, {
+      stale: job.rawTelemetry?.rawStale,
+      blocked: Boolean(job.processed?.blockers?.length || job.summary?.blockers?.length),
+      failed: job.status === "failed",
+      completed: job.status === "completed"
+    });
+    return {
+      id: job.id,
+      kind: "runner-job",
+      label: "Runner job",
+      projectSlug: job.projectSlug,
+      title: job.taskId,
+      activity: activity || "No runner activity reported",
+      status: job.status || "unknown",
+      nowStatus,
+      className: nowStatusClass(nowStatus),
+      updatedAt: job.updatedAt,
+      meta: [
+        job.remoteHost || "",
+        job.rawTelemetry?.rawStale ? "stale raw" : formatRawLine(job.rawTelemetry),
+        formatProcessedLine(job.processed)
+      ].filter(Boolean).join(" / "),
+      raw: job
+    };
+  });
+  const threads = state.threads.map((thread) => {
+    const activity = thread.processed?.latestActivity || thread.latestActivity || "";
+    const nowStatus = deriveNowStatus(thread.status, activity, {
+      stale: thread.freshness?.rawStale,
+      blocked: Boolean(thread.processed?.blockers?.length),
+      failed: thread.status === "failed",
+      completed: thread.status === "completed"
+    });
+    return {
+      id: thread.id,
+      kind: "local-thread",
+      label: formatSourceKind(thread.sourceKind),
+      projectSlug: thread.projectSlug,
+      title: thread.title || thread.threadId,
+      activity: activity || "No local activity reported",
+      status: thread.status || "unknown",
+      nowStatus,
+      className: nowStatusClass(nowStatus),
+      updatedAt: thread.updatedAt,
+      meta: [
+        thread.linkedRunnerJobId ? `linked ${thread.linkedRunnerJobId}` : "",
+        thread.freshness?.rawStale ? "stale raw" : formatRawLine({ rawChunkCount: thread.rawChunkCount, latestRawTelemetryAt: thread.latestRawTelemetryAt }),
+        formatProcessedLine(thread.processed)
+      ].filter(Boolean).join(" / "),
+      raw: thread
+    };
+  });
+  return [...jobs, ...threads]
+    .filter((item) => item.status !== "completed" || item.nowStatus === "failed")
+    .sort((left, right) => attentionRank(right) - attentionRank(left) || Date.parse(right.updatedAt || "") - Date.parse(left.updatedAt || ""));
+}
+
+function nowCard(item) {
+  return `
+    <button class="now-card status-${escapeAttribute(item.className)} ${item.kind === "local-thread" ? "local-card" : "runner-card"}" type="button" data-now-kind="${escapeAttribute(item.kind)}" data-now-id="${escapeAttribute(item.id)}">
+      <span class="now-avatar">${escapeHtml(item.kind === "runner-job" ? initials(item.projectSlug) : "LT")}</span>
+      <span class="now-card-main">
+        <span class="now-card-title">
+          <strong title="${escapeAttribute(item.title)}">${escapeHtml(item.title)}</strong>
+          <span class="status ${escapeAttribute(item.className)}">${escapeHtml(formatStatus(item.nowStatus))}</span>
+        </span>
+        <span class="now-card-project">${escapeHtml(item.projectSlug)} / ${escapeHtml(item.label)}</span>
+        <span class="now-card-activity" title="${escapeAttribute(item.activity)}">${escapeHtml(item.activity)}</span>
+        <span class="now-card-foot">
+          <span>${escapeHtml(item.meta || "no telemetry metadata")}</span>
+          <span>${escapeHtml(formatTime(item.updatedAt))}</span>
+        </span>
+      </span>
+    </button>
+  `;
+}
+
+function attentionItems() {
+  const items = [];
+  for (const job of state.jobs) {
+    const blockers = job.processed?.blockers || job.summary?.blockers || [];
+    if (job.status === "failed") {
+      items.push(attentionFromEntity("runner-job", job.id, job.projectSlug, job.taskId, "failed", "Runner job failed.", job.updatedAt));
+    } else if (job.isStuck || job.rawTelemetry?.rawStale) {
+      items.push(attentionFromEntity("runner-job", job.id, job.projectSlug, job.taskId, "timed out", "Runner telemetry is stale or marked stuck.", job.updatedAt));
+    } else if (blockers.length) {
+      items.push(attentionFromEntity("runner-job", job.id, job.projectSlug, job.taskId, "blocked", blockers[0]?.message || blockers[0] || "Blocker signal extracted.", job.updatedAt));
+    } else if (job.rawTelemetry?.rawAvailableButUnprocessed || job.processed?.freshness?.processedStale) {
+      items.push(attentionFromEntity("runner-job", job.id, job.projectSlug, job.taskId, "unprocessed", "Raw runner telemetry is ahead of the processed read model.", job.updatedAt));
+    }
+  }
+  for (const thread of state.threads) {
+    const blockers = thread.processed?.blockers || [];
+    if (thread.status === "failed") {
+      items.push(attentionFromEntity("local-thread", thread.id, thread.projectSlug, thread.title || thread.threadId, "failed", "Local thread failed.", thread.updatedAt));
+    } else if (thread.freshness?.rawStale) {
+      items.push(attentionFromEntity("local-thread", thread.id, thread.projectSlug, thread.title || thread.threadId, "stale", "Local telemetry is stale.", thread.updatedAt));
+    } else if (blockers.length) {
+      items.push(attentionFromEntity("local-thread", thread.id, thread.projectSlug, thread.title || thread.threadId, "blocked", blockers[0]?.message || "Blocker signal extracted.", thread.updatedAt));
+    } else if (thread.freshness?.processedStale) {
+      items.push(attentionFromEntity("local-thread", thread.id, thread.projectSlug, thread.title || thread.threadId, "unprocessed", "Local raw telemetry is ahead of processing.", thread.updatedAt));
+    }
+  }
+  return items.sort((left, right) => attentionSeverity(right.status) - attentionSeverity(left.status) || Date.parse(right.updatedAt || "") - Date.parse(left.updatedAt || ""));
+}
+
+function attentionFromEntity(kind, id, projectSlug, title, status, message, updatedAt) {
+  return { kind, id, projectSlug, title, status, message, updatedAt, className: nowStatusClass(status) };
+}
+
+function attentionCard(item) {
+  return `
+    <button class="attention-card status-${escapeAttribute(item.className)}" type="button" data-attention-kind="${escapeAttribute(item.kind)}" data-attention-id="${escapeAttribute(item.id)}">
+      <span class="attention-avatar">${escapeHtml(initials(item.projectSlug))}</span>
+      <span>
+        <strong title="${escapeAttribute(item.title)}">${escapeHtml(item.title)}</strong>
+        <em>${escapeHtml(item.message)}</em>
+      </span>
+      <span class="status ${escapeAttribute(item.className)}">${escapeHtml(formatStatus(item.status))}</span>
+    </button>
+  `;
+}
+
+function usageMini(usage) {
+  const latest = usage.latest || {};
+  const weekly = usage.weekly || latest.weeklyRemaining || {};
+  const rolling = usage.rolling5h || latest.rolling5hRemaining || {};
+  const burn = usage.burn || {};
+  return `
+    <div class="usage-mini">
+      ${usageMeter("Weekly", weekly, weekly.resetAt || latest.reset?.weeklyResetAt)}
+      ${usageMeter("5h window", rolling, rolling.resetAt || latest.reset?.rolling5hResetAt)}
+      <div class="usage-burn">
+        <span>Token burn <em>${escapeHtml(formatUsageMethod(burn.lastHour?.method))}</em></span>
+        <strong>${escapeHtml(formatTokenBurn(burn.lastHour))} last hour</strong>
+        <small>${escapeHtml(`${formatTokenBurn(burn.rolling5h)} over 5h / ${formatTokenBurn(burn.week)} this week`)}</small>
+      </div>
+    </div>
+  `;
+}
+
+function usageMeter(label, value, resetAt) {
+  const percent = typeof value?.percentRemaining === "number" ? Math.max(0, Math.min(100, value.percentRemaining)) : null;
+  return `
+    <div class="usage-meter">
+      <span>${escapeHtml(label)} <em>${escapeHtml(formatResetAndMethod(resetAt, value?.method))}</em></span>
+      <strong>${escapeHtml(percent === null ? formatLimitRemaining(value) : `${Math.round(percent)}%`)}</strong>
+      <i aria-hidden="true"><b style="width:${percent === null ? 0 : percent}%"></b></i>
+    </div>
+  `;
+}
+
+function projectGroups(items) {
+  const groups = new Map();
+  for (const item of items) {
+    const group = groups.get(item.projectSlug) || { slug: item.projectSlug, runner: 0, local: 0 };
+    if (item.kind === "runner-job") {
+      group.runner += 1;
+    } else {
+      group.local += 1;
+    }
+    groups.set(item.projectSlug, group);
+  }
+  return Array.from(groups.values()).slice(0, 8);
+}
+
+function openSurfaceItem(kind, id) {
+  if (kind === "runner-job") {
+    state.view = "jobs";
+    renderViewTabs();
+    loadDetail(id);
+  } else {
+    state.view = "threads";
+    renderViewTabs();
+    loadThreadDetail(id);
+  }
+}
+
+function nowStatement(item) {
+  return `${item.projectSlug} is ${nowVerb(item)}.`;
+}
+
+function nowVerb(item) {
+  if (item.nowStatus === "timed-out") return "timed out";
+  if (item.nowStatus === "ready-to-resume") return "ready to resume";
+  if (item.nowStatus === "completed") return "done";
+  return `${item.nowStatus} ${item.activity}`.trim();
+}
+
+function deriveNowStatus(status, activity, flags = {}) {
+  const text = `${status || ""} ${activity || ""}`.toLowerCase();
+  if (flags.failed || /failed|error|exception/u.test(text)) return "failed";
+  if (flags.stale || /timed out|timeout|stale/u.test(text)) return "timed-out";
+  if (flags.blocked || /blocked|waiting on secret|approval|cannot proceed/u.test(text)) return "blocked";
+  if (/ready to resume|resume/u.test(text)) return "ready-to-resume";
+  if (/edit|patch|writing|modifying/u.test(text)) return "editing";
+  if (/wait|queued|pending/u.test(text)) return "waiting";
+  if (/think|reason|planning/u.test(text)) return "thinking";
+  if (flags.completed || status === "completed") return "completed";
+  if (status === "running" || status === "active") return "running";
+  return status || "unknown";
+}
+
+function nowStatusClass(status) {
+  if (status === "timed-out") return "stuck";
+  if (status === "blocked" || status === "waiting") return "stuck";
+  if (status === "ready-to-resume") return "running";
+  return statusClass(status);
+}
+
+function attentionRank(item) {
+  return attentionSeverity(item.nowStatus) * 10000000000000 + (Date.parse(item.updatedAt || "") || 0);
+}
+
+function attentionSeverity(status) {
+  if (["failed", "timed-out", "blocked", "stale"].includes(status)) return 4;
+  if (["unprocessed", "waiting"].includes(status)) return 3;
+  if (["running", "editing", "thinking", "ready-to-resume"].includes(status)) return 2;
+  return 1;
+}
+
+function initials(value) {
+  return String(value || "AR")
+    .split(/[^a-zA-Z0-9]+/u)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase())
+    .join("") || "AR";
+}
+
+function terminalStatuses() {
+  return new Set(["completed", "failed", "stopped"]);
+}
+
+function emptyInline(message) {
+  return `<div class="inline-empty">${escapeHtml(message)}</div>`;
+}
+
+function nowSkeleton() {
+  return `
+    <section class="now-hero skeleton-row">
+      <span class="skeleton-line w-30"></span>
+      <span class="skeleton-line w-80"></span>
+      <span class="skeleton-line w-50"></span>
+    </section>
+    <div class="now-card-grid">
+      ${Array.from({ length: 4 }, () => '<div class="now-card skeleton-row"><span class="skeleton-line w-80"></span><span class="skeleton-line w-50"></span></div>').join("")}
+    </div>
+  `;
+}
+
 function normalizedTelemetry(job) {
   const telemetry = job.telemetry && typeof job.telemetry === "object" ? job.telemetry : null;
   if (!telemetry) {
@@ -1380,13 +1815,15 @@ function formatMinutes(value) {
 function formatSeatLine(spend) {
   const seats = spend.codexSubscriptionSeatMultiplier || 1;
   const monthly = spend.codexSubscriptionMonthlyUsd;
-  return monthly ? `${formatUsd(monthly)} monthly x ${seats}` : "subscription not configured";
+  const method = formatUsageMethod(spend.codexSubscriptionPriceMethod);
+  return monthly ? `${formatUsd(monthly)} monthly x ${seats} / ${method}` : "subscription default unavailable";
 }
 
 function formatAllocationShare(spend) {
   const percent = spend.codexTaskAllocationPercent;
-  const confidence = spend.codexAllocationConfidence || "unknown";
-  return typeof percent === "number" ? `${percent.toFixed(percent < 1 ? 2 : 1)}% weekly / ${confidence}` : confidence;
+  const method = formatUsageMethod(spend.codexCostMethod || spend.codexAllocationMethod || spend.tokenUsageMethod);
+  const source = spend.codexCostSource ? ` / ${formatStatus(spend.codexCostSource)}` : "";
+  return typeof percent === "number" ? `${percent.toFixed(percent < 1 ? 2 : 1)}% weekly / ${method}${source}` : `${method}${source}`;
 }
 
 function formatRemaining(spend) {
@@ -1397,7 +1834,7 @@ function formatSpendSource(spend) {
   if (!spend || typeof spend !== "object") {
     return "missing spend";
   }
-  return spend.codexAllocationConfidence || spend.confidence || "estimated";
+  return formatUsageMethod(spend.codexCostMethod || spend.codexAllocationMethod || spend.tokenUsageMethod);
 }
 
 function progressPercent(job) {
@@ -1412,8 +1849,19 @@ function progressPercent(job) {
 function percentDisplay(job) {
   const telemetry = normalizedTelemetry(job);
   const value = telemetry?.progress?.percent ?? job.summary?.progressPercent ?? job.progressPercent;
-  const confidence = telemetry?.progress?.confidence ?? job.summary?.progressConfidence ?? "";
-  return typeof value === "number" && Number.isFinite(value) ? `${formatPercent(value)} ${confidence}`.trim() : "unknown";
+  return typeof value === "number" && Number.isFinite(value) ? formatPercent(value) : "unknown";
+}
+
+function progressSourceLabel(job) {
+  const processed = job.processed?.deterministicVersion ? "deterministic" : "";
+  const telemetry = normalizedTelemetry(job);
+  if (telemetry?.progress?.source) {
+    return telemetry.progress.source;
+  }
+  if (processed) {
+    return processed;
+  }
+  return job.status === "completed" ? "complete" : "reported";
 }
 
 function formatPercent(value) {
@@ -1541,11 +1989,14 @@ function memoryEvidenceEvent(evidence) {
 }
 
 function formatGoalMeta(goal) {
-  return [formatStatus(goal.state), `${goal.confidence || "low"} confidence`, goal.source || ""].filter(Boolean).join(" / ");
+  return [formatStatus(goal.state), goal.source || ""].filter(Boolean).join(" / ");
 }
 
 function formatEvidenceLabel(value) {
-  return ["observed", "calculated", "extracted", "estimated"].includes(value) ? value : `${value || "low"} confidence`;
+  if (["observed", "calculated", "extracted", "estimated"].includes(value)) {
+    return value;
+  }
+  return `${value || "low"} signal`;
 }
 
 function formatProcessedLine(processed) {
@@ -1572,12 +2023,58 @@ function formatLimitRemaining(value) {
   return typeof remaining === "number" ? formatNumber(remaining) : "unknown";
 }
 
+function formatLimitUsed(value) {
+  if (!value || typeof value !== "object") {
+    return "unknown";
+  }
+  const percent = value.usedPercent;
+  if (typeof percent === "number" && Number.isFinite(percent)) {
+    return `${percent.toFixed(percent < 10 ? 1 : 0)}%`;
+  }
+  const used = value.usedTokens ?? value.used;
+  return typeof used === "number" ? formatNumber(used) : "unknown";
+}
+
+function formatLimitTokens(value) {
+  if (!value || typeof value !== "object") {
+    return "limit unknown";
+  }
+  const used = value.usedTokens;
+  const limit = value.limitTokens;
+  if (typeof used === "number" && typeof limit === "number") {
+    return `${formatNumber(used)} used of ${formatNumber(limit)}`;
+  }
+  if (typeof limit === "number") {
+    return `${formatNumber(limit)} limit`;
+  }
+  return "limit unknown";
+}
+
 function formatReset(value) {
   return value ? `resets ${formatTime(value)}` : "reset unknown";
 }
 
+function formatResetAndMethod(resetAt, method) {
+  return `${formatReset(resetAt)} / ${formatUsageMethod(method)}`;
+}
+
 function formatLimitEta(value) {
   return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(value < 10 ? 1 : 0)}h until limit` : "limit ETA unknown";
+}
+
+function formatTokenBurn(value) {
+  const tokens = value?.tokens;
+  return typeof tokens === "number" && Number.isFinite(tokens) ? formatNumber(tokens) : "unknown";
+}
+
+function formatBurnRate(value) {
+  const rate = value?.tokensPerHour;
+  const method = formatUsageMethod(value?.method);
+  return typeof rate === "number" && Number.isFinite(rate) ? `${formatNumber(rate)} tokens/hour / ${method}` : `rate unknown / ${method}`;
+}
+
+function formatUsageMethod(value) {
+  return ["measured", "allocated", "estimated", "unknown"].includes(value) ? value : "unknown";
 }
 
 function formatNumber(value) {

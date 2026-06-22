@@ -3,6 +3,7 @@ import path from "node:path";
 import { Command } from "commander";
 import { bootstrap } from "./commands/bootstrap.js";
 import {
+  createFinalProjectSnapshot,
   createDroplet,
   dropletStatus,
   destroyDroplet,
@@ -21,6 +22,7 @@ import {
 import {
   telemetryAutostartInstall,
   telemetryAutostartStatus,
+  telemetryCleanupLiveTest,
   telemetryFlush,
   telemetryProcessOnce,
   telemetryProcessorRebuild,
@@ -36,6 +38,13 @@ import {
 import { upDevcontainer } from "./commands/up.js";
 import { createCommandContext } from "./context.js";
 import { DashboardLaunchError } from "./commands/dashboard.js";
+import {
+  readDigitalOceanState,
+  stateWithLifecycleTimings,
+  writeDigitalOceanState,
+  type LifecycleTimingsState,
+  type PhaseTimingState
+} from "./infra-state.js";
 
 interface GlobalOptions {
   cwd: string;
@@ -258,6 +267,19 @@ export function buildProgram(): Command {
     });
 
   telemetry
+    .command("cleanup-live-test")
+    .description("Delete production dashboard records and raw telemetry for an explicit live-test prefix")
+    .requiredOption("--prefix <prefix>", "live-test-YYYYMMDDTHHMMSSZ-shortid prefix to delete")
+    .action(async (options: { prefix: string }) => {
+      const globals = getGlobals(program);
+      const result = await telemetryCleanupLiveTest(createContext(globals), options.prefix);
+      write(globals, result, formatTelemetryCleanup(result));
+      if (!result.ok) {
+        process.exitCode = 1;
+      }
+    });
+
+  telemetry
     .command("process-once")
     .description("Process pending raw telemetry into dashboard read models once")
     .action(async () => {
@@ -415,6 +437,8 @@ async function startTask(
   prompt: string,
   options: { taskId?: string; create?: boolean; skipUp?: boolean }
 ): Promise<void> {
+  const totalStart = startPhase();
+  const timings: LifecycleTimingsState = {};
   let context = createContext(globals);
   let createdManagedDroplet = false;
   if (options.create !== false && context.config.digitalOcean.token) {
@@ -427,21 +451,37 @@ async function startTask(
 
   if (options.create !== false && !context.config.remote.host) {
     const created = await createDroplet(context.config);
+    Object.assign(timings, created.timings || {});
     createdManagedDroplet = true;
     write(globals, created, formatDropletCreated(created));
     context = createContext(globals);
   }
 
   try {
+    const pushTiming = startPhase();
     const digest = await pushProject(context);
+    timings.projectSyncDuration = finishPhase(pushTiming);
     write(globals, { digest }, `pushed workspace manifest ${digest}`);
 
     if (!options.skipUp) {
-      await upDevcontainer(context);
+      const upResult = await upDevcontainer(context);
+      timings.devcontainerReadyDuration = phaseFromDuration(upResult.devcontainerReadyDurationMs);
+      timings.codexInstallDuration = phaseFromDuration(upResult.codexInstallDurationMs);
+      timings.codexAppServerReadyDuration = phaseFromDuration(upResult.codexAppServerReadyDurationMs);
       write(globals, { ok: true }, "remote devcontainer is ready");
+    } else {
+      timings.devcontainerReadyDuration = skippedPhase();
+      timings.codexAppServerReadyDuration = skippedPhase();
     }
 
+    const acceptedTiming = startPhase();
     const result = await runTask(context, prompt, { taskId: options.taskId });
+    timings.firstTelemetryIngestVisible = finishPhase(acceptedTiming);
+    timings.totalStartCommandToAcceptedJob = finishPhase(totalStart);
+    if (context.config.digitalOcean.token) {
+      const state = await readDigitalOceanState(context.config.projectSlug);
+      await writeDigitalOceanState(stateWithLifecycleTimings(context.config.projectSlug, timings, "startup", state));
+    }
     write(globals, result, formatTaskStarted(result));
   } catch (error) {
     if (createdManagedDroplet && error instanceof DashboardLaunchError) {
@@ -454,13 +494,76 @@ async function startTask(
 
 async function finishTask(globals: GlobalOptions, options: { keepDroplet?: boolean }): Promise<void> {
   const context = createContext(globals);
+  const statusText = await taskStatus(context).catch((error) => {
+    throw new Error(`Unable to confirm task terminal state before finish: ${error instanceof Error ? error.message : String(error)}`);
+  });
+  assertTerminalTaskStatus(statusText);
   const digest = await pullProject(context);
   write(globals, { digest }, `pulled workspace manifest ${digest}`);
 
   if (!options.keepDroplet) {
+    const finishTimings: LifecycleTimingsState = {};
+    const snapshotTiming = startPhase();
+    await context.remote.run("sync || true");
+    const snapshot = await createFinalProjectSnapshot(context.config);
+    finishTimings.terminalStateToFinalSnapshotComplete = finishPhase(snapshotTiming);
+    write(globals, snapshot, `snapshot ${snapshot.snapshot.id} (${snapshot.snapshot.name}) is ready`);
+
+    const destroyTiming = startPhase();
     const result = await destroyDroplet(context.config, { yes: true });
+    finishTimings.finalSnapshotCompleteToDropletDestroyed = finishPhase(destroyTiming);
+    const state = await readDigitalOceanState(context.config.projectSlug);
+    await writeDigitalOceanState(stateWithLifecycleTimings(context.config.projectSlug, finishTimings, "finish", state));
     write(globals, result, formatDropletDestroyed(result));
   }
+}
+
+function assertTerminalTaskStatus(statusText: string): void {
+  let parsed: { status?: string } = {};
+  try {
+    parsed = JSON.parse(statusText) as { status?: string };
+  } catch {
+    throw new Error(`Unable to parse task status before finish: ${statusText}`);
+  }
+  const status = parsed.status || "unknown";
+  if (!["completed", "failed", "stopped"].includes(status)) {
+    throw new Error(`Refusing to finish managed lifecycle while task status is ${status}. Wait for completion or stop the task first.`);
+  }
+}
+
+function startPhase(): { startedAt: string; startedMs: number } {
+  return {
+    startedAt: new Date().toISOString(),
+    startedMs: Date.now()
+  };
+}
+
+function finishPhase(phase: { startedAt: string; startedMs: number }, error?: unknown): PhaseTimingState {
+  return {
+    startedAt: phase.startedAt,
+    finishedAt: new Date().toISOString(),
+    durationMs: Math.max(0, Date.now() - phase.startedMs),
+    ...(error ? { error: error instanceof Error ? error.message : String(error) } : {})
+  };
+}
+
+function phaseFromDuration(durationMs: number): PhaseTimingState {
+  const finishedAt = new Date();
+  return {
+    startedAt: new Date(finishedAt.getTime() - Math.max(0, durationMs)).toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: Math.max(0, durationMs)
+  };
+}
+
+function skippedPhase(): PhaseTimingState {
+  const now = new Date().toISOString();
+  return {
+    startedAt: now,
+    finishedAt: now,
+    durationMs: 0,
+    skipped: true
+  };
 }
 
 function write(options: GlobalOptions, value: unknown, text: string): void {
@@ -502,13 +605,16 @@ function parseImage(value: string | undefined): string | number | undefined {
 }
 
 function formatDropletCreated(result: Awaited<ReturnType<typeof createDroplet>>): string {
-  return [
+  const lines = [
     `droplet ${result.dropletId} (${result.name}) is ready`,
     `ip: ${result.ip}`,
     `region: ${result.region}`,
     `size: ${result.size}`,
+    result.snapshotUsed ? `snapshot: ${result.snapshotId} (${result.snapshotName})` : `snapshot: none`,
+    result.snapshotFallbackError ? `snapshot fallback: ${result.snapshotFallbackError}` : "",
     `bootstrapped: ${result.bootstrapped ? "yes" : "no"}`
-  ].join("\n");
+  ];
+  return lines.filter(Boolean).join("\n");
 }
 
 function formatDropletDestroyed(result: Awaited<ReturnType<typeof destroyDroplet>>): string {
@@ -545,6 +651,18 @@ function formatTelemetryFlush(result: Awaited<ReturnType<typeof telemetryFlush>>
     `uploaded: ${result.uploaded}`,
     `skipped: ${result.skipped}`,
     `state: ${result.statePath}`
+  ].join("\n");
+}
+
+function formatTelemetryCleanup(result: Awaited<ReturnType<typeof telemetryCleanupLiveTest>>): string {
+  const remaining = Object.entries(result.remaining || {})
+    .filter(([, count]) => Number(count) > 0)
+    .map(([name, count]) => `${name}:${count}`);
+  return [
+    `cleanup prefix: ${result.prefix}`,
+    `ok: ${result.ok ? "yes" : "no"}`,
+    `r2 objects deleted: ${result.r2ObjectsDeleted}`,
+    remaining.length ? `remaining: ${remaining.join(", ")}` : "remaining: none"
   ].join("\n");
 }
 

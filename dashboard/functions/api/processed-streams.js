@@ -1,9 +1,11 @@
+import { authenticateApiRequest, cors, json } from "../_shared/auth.js";
+
 export async function onRequestOptions() {
   return cors(new Response(null, { status: 204 }));
 }
 
 export async function onRequestGet({ request, env }) {
-  const auth = authenticateRead(request, env);
+  const auth = authenticateApiRequest(request, env);
   if (auth) {
     return cors(json(auth.body, auth.status));
   }
@@ -45,7 +47,7 @@ export function mapProcessedStreamRow(row) {
     blockers: parseJson(row.blocker_json, []),
     files: parseJson(row.files_json, []),
     tokenUsage: parseJson(row.token_usage_json, {}),
-    cost: parseJson(row.cost_json, {}),
+    cost: sanitizeCost(parseJson(row.cost_json, {})),
     linkedStreams: parseJson(row.linked_streams_json, []),
     deterministicVersion: row.deterministic_version,
     modelVersion: row.model_version,
@@ -56,25 +58,6 @@ export function mapProcessedStreamRow(row) {
   };
 }
 
-function authenticateRead(request, env) {
-  if (request.headers.get("cf-access-jwt-assertion") || request.headers.get("cf-access-authenticated-user-email")) {
-    return null;
-  }
-
-  const expected = env.AGENT_RUNNER_DASHBOARD_TOKEN || env.AGENT_RUNNER_DASHBOARD_PREVIEW_TOKEN;
-  if (!expected) {
-    return { status: 500, body: { error: "AGENT_RUNNER_DASHBOARD_TOKEN is not configured" } };
-  }
-  const header = request.headers.get("authorization") || "";
-  const token = header.toLowerCase().startsWith("bearer ")
-    ? header.slice(7)
-    : request.headers.get("x-agent-runner-token") || "";
-  if (token !== expected) {
-    return { status: 401, body: { error: "Unauthorized" } };
-  }
-  return null;
-}
-
 function parseJson(value, fallback) {
   try {
     return JSON.parse(value);
@@ -83,19 +66,15 @@ function parseJson(value, fallback) {
   }
 }
 
-function json(value, status = 200) {
-  return new Response(JSON.stringify(value), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store"
-    }
-  });
-}
-
-function cors(response) {
-  response.headers.set("access-control-allow-origin", "*");
-  response.headers.set("access-control-allow-methods", "GET,POST,OPTIONS");
-  response.headers.set("access-control-allow-headers", "authorization,content-type,x-agent-runner-token");
-  return response;
+function sanitizeCost(cost) {
+  if (!cost || typeof cost !== "object" || Array.isArray(cost)) {
+    return {};
+  }
+  const {
+    confidence: _confidence,
+    digitalOceanConfidence: _digitalOceanConfidence,
+    codexAllocationConfidence: _codexAllocationConfidence,
+    ...rest
+  } = cost;
+  return rest;
 }

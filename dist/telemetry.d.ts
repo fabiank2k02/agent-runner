@@ -48,6 +48,19 @@ export interface RawTelemetryEnvelope {
     truncated?: boolean;
     truncationReason?: string;
 }
+export declare class TelemetryIngestError extends Error {
+    readonly status: number;
+    readonly body: {
+        error?: string;
+        conflict?: boolean;
+        latestSequence?: number;
+    } | undefined;
+    constructor(message: string, status: number, body: {
+        error?: string;
+        conflict?: boolean;
+        latestSequence?: number;
+    } | undefined);
+}
 export interface LocalTelemetryStreamState {
     sequence: number;
     cursor?: Cursor;
@@ -184,7 +197,7 @@ export declare function flushLocalTelemetry(context: CommandContext, options?: {
     force?: boolean;
     now?: Date;
 }): Promise<LocalTelemetryFlushResult>;
-export declare function uploadRawTelemetryEnvelope(context: CommandContext, envelope: RawTelemetryEnvelope): Promise<void>;
+export declare function uploadRawTelemetryEnvelope(context: CommandContext, envelope: RawTelemetryEnvelope): Promise<Record<string, unknown>>;
 export declare function localTelemetryStatus(context: CommandContext, options?: {
     statePath?: string;
 }): Promise<LocalTelemetryStatus>;

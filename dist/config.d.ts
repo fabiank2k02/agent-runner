@@ -19,6 +19,11 @@ declare const configFileSchema: z.ZodObject<{
         reasoningEffort: z.ZodDefault<z.ZodString>;
         yolo: z.ZodDefault<z.ZodBoolean>;
         model: z.ZodOptional<z.ZodString>;
+        execution: z.ZodDefault<z.ZodEnum<{
+            "app-server": "app-server";
+            exec: "exec";
+        }>>;
+        allowExecFallback: z.ZodDefault<z.ZodBoolean>;
         extraArgs: z.ZodDefault<z.ZodArray<z.ZodString>>;
     }, z.core.$strip>>;
     rsync: z.ZodDefault<z.ZodObject<{
@@ -74,6 +79,8 @@ export interface ResolvedConfig {
         reasoningEffort: string;
         yolo: boolean;
         model?: string;
+        execution: "app-server" | "exec";
+        allowExecFallback: boolean;
         extraArgs: string[];
     };
     rsync: {
@@ -90,12 +97,16 @@ export interface ResolvedConfig {
         dropletName: string;
         tags: string[];
         hourlyPriceUsd?: number;
+        snapshotSourceId?: string | number;
+        snapshotSourceName?: string;
     };
     dashboard: {
         enabled: boolean;
         endpoint?: string;
         token?: string;
         tokenEnv: string;
+        accessClientId?: string;
+        accessClientSecret?: string;
         intervalSeconds: number;
         model?: string;
         reasoningEffort: string;

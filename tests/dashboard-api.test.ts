@@ -38,6 +38,48 @@ function request(payload: unknown) {
 }
 
 describe("dashboard ingest API", () => {
+  it("returns JSON 401 for missing or invalid API auth", async () => {
+    const response = await onRequestPost({
+      request: new Request("https://dashboard.example.com/api/ingest", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({})
+      }),
+      env: { DB: new FakeD1(), AGENT_RUNNER_DASHBOARD_TOKEN: "dev-token" }
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(body.error).toBe("Unauthorized");
+  });
+
+  it("accepts configured Cloudflare Access service-token headers", async () => {
+    const db = new FakeD1();
+    db.firstResult = {
+      id: "sample:task-live",
+      status: "running",
+      updated_at: "2026-06-17T00:00:00.000Z"
+    };
+
+    const response = await onRequestGet({
+      request: new Request("https://dashboard.example.com/api/ingest?verifyJobId=sample%3Atask-live", {
+        headers: {
+          "CF-Access-Client-Id": "client-id",
+          "CF-Access-Client-Secret": "client-secret"
+        }
+      }),
+      env: {
+        DB: db,
+        AGENT_RUNNER_CF_ACCESS_CLIENT_ID: "client-id",
+        AGENT_RUNNER_CF_ACCESS_CLIENT_SECRET: "client-secret"
+      }
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ exists: true });
+  });
+
   it("verifies a job through the ingest bypass route", async () => {
     const db = new FakeD1();
     db.firstResult = {
@@ -233,6 +275,86 @@ describe("dashboard ingest API", () => {
     expect(db.runs.some((run) => run.sql.includes("UPDATE jobs"))).toBe(false);
   });
 
+  it("parses app-server token usage events into stream token usage", async () => {
+    const db = new FakeD1();
+    const response = await onRequestPost({
+      request: request({
+        version: 1,
+        kind: "raw-telemetry",
+        sourceKind: "codex-cli-thread",
+        sourceId: "codex-cli-thread:sample:host",
+        streamKind: "codex-thread",
+        projectSlug: "sample",
+        streamId: "thread-token-usage",
+        sequence: 1,
+        generatedAt: "2026-06-18T08:00:00.000Z",
+        metadata: { title: "Token usage", status: "active" },
+        payload: {
+          events: [
+            {
+              type: "thread/tokenUsage/updated",
+              usage: {
+                input_tokens: 120,
+                cached_input_tokens: 20,
+                output_tokens: 80,
+                reasoning_output_tokens: 10
+              }
+            }
+          ]
+        }
+      }),
+      env: { DB: db, AGENT_RUNNER_DASHBOARD_TOKEN: "dev-token" }
+    });
+
+    const streamRun = db.runs.find((run) => run.sql.includes("INSERT INTO telemetry_streams"));
+    const usage = JSON.parse(String(streamRun?.args[15] || "{}"));
+    expect(response.status).toBe(200);
+    expect(usage.inputTokens).toBe(120);
+    expect(usage.outputTokens).toBe(80);
+    expect(usage.totalTokens).toBe(200);
+  });
+
+  it("parses app-server rate-limit events into account usage snapshots", async () => {
+    const db = new FakeD1();
+    const response = await onRequestPost({
+      request: request({
+        version: 1,
+        kind: "raw-telemetry",
+        sourceKind: "local-workspace",
+        sourceId: "local-workspace:sample",
+        streamKind: "workspace",
+        projectSlug: "sample",
+        streamId: "account-usage-sample",
+        sequence: 1,
+        generatedAt: "2026-06-18T08:00:00.000Z",
+        payload: {
+          event: {
+            type: "account/rateLimits/updated",
+            rateLimits: {
+              primary: { durationMinutes: 300, remaining: 4100, limit: 10000, resetAt: "2026-06-18T13:00:00.000Z" },
+              secondary: { durationMinutes: 10080, remaining: 72000, limit: 100000, resetAt: "2026-06-22T00:00:00.000Z" }
+            },
+            usage: { total_tokens: 22000 }
+          }
+        }
+      }),
+      env: { DB: db, AGENT_RUNNER_DASHBOARD_TOKEN: "dev-token" }
+    });
+
+    const usageRun = db.runs.find((run) => run.sql.includes("INSERT OR REPLACE INTO account_usage_snapshots"));
+    const weekly = JSON.parse(String(usageRun?.args[4] || "{}"));
+    const rolling = JSON.parse(String(usageRun?.args[5] || "{}"));
+    const tokenUsage = JSON.parse(String(usageRun?.args[6] || "{}"));
+    const reset = JSON.parse(String(usageRun?.args[7] || "{}"));
+    expect(response.status).toBe(200);
+    expect(weekly.remainingTokens).toBe(72000);
+    expect(weekly.usedPercent).toBe(28);
+    expect(rolling.remainingTokens).toBe(4100);
+    expect(rolling.usedPercent).toBe(59);
+    expect(tokenUsage.totalTokens).toBe(22000);
+    expect(reset.weeklyResetAt).toBe("2026-06-22T00:00:00.000Z");
+  });
+
   it("accepts duplicate raw chunks with the same stream sequence and hash", async () => {
     const payload = {
       version: 1,
@@ -266,7 +388,7 @@ describe("dashboard ingest API", () => {
 
   it("detects raw chunk sequence conflicts with a different hash", async () => {
     const db = new FakeD1();
-    db.firstResult = { id: "chunk-existing", sha256: "different" };
+    db.firstResults = [{ id: "chunk-existing", sha256: "different" }, { latest_sequence: 7 }];
     const response = await onRequestPost({
       request: request({
         version: 1,
@@ -283,6 +405,7 @@ describe("dashboard ingest API", () => {
 
     expect(response.status).toBe(409);
     expect(body.conflict).toBe(true);
+    expect(body.latestSequence).toBe(7);
     expect(db.runs.some((run) => run.sql.includes("INSERT OR IGNORE INTO telemetry_conflicts"))).toBe(true);
   });
 

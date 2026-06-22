@@ -105,6 +105,22 @@ describe("telemetry processor", () => {
     expect(JSON.parse(db.processedStreams[0].token_usage_json).totalTokens).toBe(5);
   });
 
+  it("does not double count stream-level token usage when raw chunks are processed", async () => {
+    const db = new FakeD1();
+    const stream = streamRow("codex-thread:sample:thread-token", "codex-thread", "thread-token");
+    stream.token_usage_json = JSON.stringify({ inputTokens: 10, outputTokens: 5, totalTokens: 15 });
+    db.telemetryStreams.push(stream);
+    db.telemetryChunks.push(chunkRow({
+      streamId: "codex-thread:sample:thread-token",
+      sequence: 1,
+      payload: { thread: { tokenUsage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } } }
+    }));
+
+    await runProcessor({ env: { DB: db }, projectSlug: "sample", ownerId: "owner" });
+
+    expect(JSON.parse(db.processedStreams[0].token_usage_json).totalTokens).toBe(15);
+  });
+
   it("supersedes older memory when newer evidence says it replaces a title", async () => {
     const db = new FakeD1();
     db.projectMemory.push({

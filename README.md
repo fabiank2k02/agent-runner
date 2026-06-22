@@ -209,10 +209,12 @@ POST /api/ingest
 GET  /api/jobs
 GET  /api/jobs/:id
 GET  /api/threads
+GET  /api/local-threads
 GET  /api/processed-streams
 GET  /api/memory
 GET  /api/processor
 POST /api/processor
+POST /api/admin/test-cleanup
 ```
 
 Deploy setup:
@@ -227,11 +229,11 @@ npm run wrangler -- pages secret put AGENT_RUNNER_DASHBOARD_TOKEN --project-name
 npm run deploy
 ```
 
-The dashboard scripts accept either `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_TOKEN`. Use the deployed Pages URL plus `/api/ingest` as `AGENT_RUNNER_DASHBOARD_ENDPOINT` in each repo that should report progress.
+Use `CLOUDFLARE_TOKEN` for deploy and diagnostics. The dashboard scripts still map it to Wrangler's token environment internally. Use the deployed Pages URL plus `/api/ingest` as `AGENT_RUNNER_DASHBOARD_ENDPOINT` in each repo that should report progress.
 
 The Cloudflare token needs account-level D1 edit and Pages edit permissions. Account Settings read and User Memberships read let Wrangler discover the account automatically.
 
-For the public dashboard, put Cloudflare Access in front of the Pages hostname using Cloudflare as the identity provider, with account-member restriction enabled. Keep `/api/ingest` as a more-specific Access bypass application so runners can post updates with `AGENT_RUNNER_DASHBOARD_TOKEN` without a browser login. Dashboard read APIs can then rely on the Access session instead of a second browser token.
+For the public dashboard, put Cloudflare Access in front of the Pages hostname using Cloudflare as the identity provider, with account-member restriction enabled. Keep `/api/*` as a more-specific Access bypass application so machine API calls reach Pages Functions and receive JSON responses. The functions still require `AGENT_RUNNER_DASHBOARD_TOKEN` or configured `CF-Access-Client-Id` / `CF-Access-Client-Secret` service-token headers, so dashboard data is not public.
 
 The ingest API remains backward-compatible with payloads containing only `summary`, `status`, and `logTail`. New runners send optional `telemetry` snapshots. Live telemetry updates the `jobs.telemetry_json` field and does not create per-event rows. Summary and terminal telemetry create sparse `summaries` history rows, with raw log tails kept only on the latest job row for debugging.
 

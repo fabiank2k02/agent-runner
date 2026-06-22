@@ -1,3 +1,4 @@
+import { cleanupDashboardLiveTestData } from "../dashboard-cleanup.js";
 import { devcontainerTelemetryAutostartStatus, installDevcontainerTelemetryAutostart } from "../devcontainer-autostart.js";
 import { processTelemetryOnce, processorStatus, rebuildTelemetryProcessing, runProcessorService, startProcessorService, stopProcessorService } from "../telemetry-processor.js";
 import { flushLocalTelemetry, localTelemetryStatus, runLocalTelemetryService, startLocalTelemetryService, stopLocalTelemetryService } from "../telemetry.js";
@@ -39,5 +40,8 @@ export async function telemetryProcessorRebuild(context, scope) {
 }
 export async function telemetryProcessorService(context) {
     await runProcessorService(context);
+}
+export async function telemetryCleanupLiveTest(context, prefix) {
+    return cleanupDashboardLiveTestData(context, prefix);
 }
 //# sourceMappingURL=telemetry.js.map

@@ -6,15 +6,19 @@ export function telemetryAutostartCommand() {
     return [
         "sh -lc '",
         "cd \"${containerWorkspaceFolder}\" 2>/dev/null || cd \"$PWD\"; ",
+        "run_agent_runner() { ",
         "if command -v agent-runner >/dev/null 2>&1; then ",
-        "agent-runner -C \"$PWD\" telemetry start; ",
+        "agent-runner -C \"$PWD\" \"$@\"; ",
         "elif [ -x ./node_modules/.bin/agent-runner ]; then ",
-        "./node_modules/.bin/agent-runner -C \"$PWD\" telemetry start; ",
+        "./node_modules/.bin/agent-runner -C \"$PWD\" \"$@\"; ",
         "elif [ -f ./dist/cli.js ]; then ",
-        "node ./dist/cli.js -C \"$PWD\" telemetry start; ",
+        "node ./dist/cli.js -C \"$PWD\" \"$@\"; ",
         "else ",
-        "echo \"agent-runner telemetry autostart skipped: CLI not found\" >&2; ",
-        "fi",
+        "return 127; ",
+        "fi; ",
+        "}; ",
+        "if run_agent_runner telemetry start; then :; else echo \"agent-runner telemetry autostart skipped or failed\" >&2; fi; ",
+        "if run_agent_runner telemetry processor start; then :; else echo \"agent-runner processor autostart skipped or failed\" >&2; fi",
         "' || true"
     ].join("");
 }

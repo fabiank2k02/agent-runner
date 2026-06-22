@@ -65,7 +65,7 @@ describe("raw/local telemetry helpers", () => {
     const uploads: unknown[] = [];
     vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
       uploads.push(JSON.parse(String(init.body)));
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
     });
 
     const adapter: TelemetrySourceAdapter = {
@@ -111,6 +111,51 @@ describe("raw/local telemetry helpers", () => {
     expect(processorWakes).toHaveLength(1);
     expect(state.streams["codex-cli-thread:thread-1"].sequence).toBe(1);
     expect(state.streams["codex-cli-thread:thread-1"].cursor.fileOffset).toBe(10);
+  });
+
+  it("retries raw telemetry at the server latest sequence after a sequence conflict", async () => {
+    const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), "agent-runner-telemetry-"));
+    const statePath = path.join(tmp, "state.json");
+    const sequences: number[] = [];
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      const payload = JSON.parse(String(init.body));
+      if (payload.action === "wake") {
+        return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      sequences.push(payload.sequence);
+      if (payload.sequence === 1) {
+        return new Response(JSON.stringify({ error: "Raw telemetry sequence conflict", conflict: true, latestSequence: 4 }), {
+          status: 409,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+
+    const adapter: TelemetrySourceAdapter = {
+      kind: "codex-cli-thread",
+      async discover() {
+        return [{ id: "thread-reset", kind: "codex-thread", sourceKind: "codex-cli-thread", title: "Thread reset" }];
+      },
+      async readDelta() {
+        return {
+          cursor: { fileOffset: 20 },
+          payload: { thread: { id: "thread-reset", status: "active" } }
+        };
+      }
+    };
+
+    const result = await flushLocalTelemetry(fakeContext(tmp), {
+      adapters: [adapter],
+      statePath,
+      now: new Date("2026-06-17T00:00:00.000Z")
+    });
+    const state = JSON.parse(await fs.promises.readFile(statePath, "utf8"));
+
+    expect(result.uploaded).toBe(1);
+    expect(sequences).toEqual([1, 5]);
+    expect(result.streams[0]?.sequence).toBe(5);
+    expect(state.streams["codex-cli-thread:thread-reset"].sequence).toBe(5);
   });
 });
 

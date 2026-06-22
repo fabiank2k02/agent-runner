@@ -50,12 +50,30 @@ export class DigitalOceanClient {
         const data = await this.request("POST", "/droplets", body);
         return data.droplet;
     }
+    async listDropletSnapshots() {
+        const data = await this.request("GET", "/snapshots?resource_type=droplet&per_page=200");
+        return data.snapshots;
+    }
+    async createDropletSnapshot(dropletId, name) {
+        const data = await this.request("POST", `/droplets/${dropletId}/actions`, {
+            type: "snapshot",
+            name
+        });
+        return data.action;
+    }
+    async getDropletAction(dropletId, actionId) {
+        const data = await this.request("GET", `/droplets/${dropletId}/actions/${actionId}`);
+        return data.action;
+    }
     async getDroplet(id) {
         const data = await this.request("GET", `/droplets/${id}`);
         return data.droplet;
     }
     async deleteDroplet(id) {
         await this.request("DELETE", `/droplets/${id}`);
+    }
+    async deleteSnapshot(id) {
+        await this.request("DELETE", `/snapshots/${encodeURIComponent(String(id))}`);
     }
     async request(method, path, body) {
         const response = await fetch(`${baseUrl}${path}`, {

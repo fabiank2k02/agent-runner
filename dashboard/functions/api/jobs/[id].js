@@ -1,9 +1,16 @@
+import { authenticateApiRequest, cors, json } from "../../_shared/auth.js";
+import { classifyJob } from "../../_shared/job-truth.js";
+import {
+  aggregateAccountUsageRows,
+  estimateJobCodexCost
+} from "../../_shared/usage.js";
+
 export async function onRequestOptions() {
   return cors(new Response(null, { status: 204 }));
 }
 
 export async function onRequestGet({ request, env, params }) {
-  const auth = authenticateRead(request, env);
+  const auth = authenticateApiRequest(request, env);
   if (auth) {
     return cors(json(auth.body, auth.status));
   }
@@ -57,33 +64,36 @@ export async function onRequestGet({ request, env, params }) {
     .bind(`runner-job:${job.project_slug}:${job.task_id}`)
     .all();
 
+  const usageRows = await usageRowsForJob(env.DB, job);
+  const accountUsage = aggregateAccountUsageRows(usageRows, { env });
+
   return cors(json({
-    job: mapJobRow(job),
+    job: mapJobRow(job, { env, accountUsage }),
     history: (history.results || []).map(mapSummaryRow),
     rawChunks: (chunks.results || []).map(mapChunkRow)
   }));
 }
 
-function authenticateRead(request, env) {
-  if (request.headers.get("cf-access-jwt-assertion") || request.headers.get("cf-access-authenticated-user-email")) {
-    return null;
-  }
-
-  const expected = env.AGENT_RUNNER_DASHBOARD_TOKEN || env.AGENT_RUNNER_DASHBOARD_PREVIEW_TOKEN;
-  if (!expected) {
-    return { status: 500, body: { error: "AGENT_RUNNER_DASHBOARD_TOKEN is not configured" } };
-  }
-  const header = request.headers.get("authorization") || "";
-  const token = header.toLowerCase().startsWith("bearer ")
-    ? header.slice(7)
-    : request.headers.get("x-agent-runner-token") || "";
-  if (token !== expected) {
-    return { status: 401, body: { error: "Unauthorized" } };
-  }
-  return null;
+async function usageRowsForJob(db, job) {
+  const start = job.started_at || job.updated_at || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const end = job.finished_at || job.last_seen_at || job.updated_at || new Date().toISOString();
+  const result = await db.prepare(
+    `SELECT id, source_id, collected_at, weekly_remaining_json, rolling_5h_remaining_json,
+      token_usage_json, reset_json, metadata_json
+     FROM account_usage_snapshots
+     WHERE project_slug = ?
+       AND collected_at >= ?
+       AND collected_at <= ?
+     ORDER BY collected_at ASC
+     LIMIT 50`
+  )
+    .bind(job.project_slug, start, end)
+    .all();
+  return result.results || [];
 }
 
-function mapJobRow(row) {
+function mapJobRow(row, context = {}) {
+  const truth = classifyJob(row, context);
   return {
     id: row.id,
     projectSlug: row.project_slug,
@@ -91,7 +101,9 @@ function mapJobRow(row) {
     sessionName: row.session_name,
     observerSessionName: row.observer_session_name,
     remoteHost: row.remote_host,
-    status: row.status,
+    status: truth.status,
+    reportedStatus: truth.reportedStatus,
+    truth,
     exitCode: row.exit_code,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
@@ -115,19 +127,28 @@ function mapJobRow(row) {
       rawPayloadAvailable: Boolean(row.raw_payload_available),
       rawStatus: row.raw_status,
       rawAgeSeconds: ageSeconds(row.last_raw_telemetry_at),
-      rawStale: isRawStale(row.status, row.last_raw_telemetry_at, 10 * 60),
+      rawStale: truth.status === "stale" || isRawStale(truth.status, row.last_raw_telemetry_at, 10 * 60),
       processedAgeSeconds: ageSeconds(row.updated_at),
       processedStale: isProcessedStale(row.status, row.last_raw_telemetry_at, row.updated_at),
       rawAvailableButUnprocessed: Boolean(row.last_raw_telemetry_at && (!row.processed_at || Date.parse(row.last_raw_telemetry_at) - Date.parse(row.processed_at) > 10 * 60 * 1000))
     },
-    processed: mapProcessed(row)
+    processed: mapProcessed(row, context)
   };
 }
 
-function mapProcessed(row) {
+function mapProcessed(row, context = {}) {
   if (!row.processed_at) {
     return null;
   }
+  const tokenUsage = parseJson(row.processed_token_usage_json, {});
+  const cost = estimateJobCodexCost({
+    tokenUsage,
+    cost: parseJson(row.processed_cost_json, {}),
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    accountUsage: context.accountUsage,
+    env: context.env || {}
+  });
   return {
     status: row.processed_status,
     summary: row.processed_summary,
@@ -135,8 +156,8 @@ function mapProcessed(row) {
     nextAction: row.processed_next_action,
     blockers: parseJson(row.processed_blocker_json, []),
     files: parseJson(row.processed_files_json, []),
-    tokenUsage: parseJson(row.processed_token_usage_json, {}),
-    cost: parseJson(row.processed_cost_json, {}),
+    tokenUsage,
+    cost,
     linkedStreams: parseJson(row.processed_linked_streams_json, []),
     deterministicVersion: row.deterministic_version,
     modelVersion: row.model_version,
@@ -206,21 +227,4 @@ function parseJson(value, fallback) {
   } catch {
     return fallback;
   }
-}
-
-function json(value, status = 200) {
-  return new Response(JSON.stringify(value), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store"
-    }
-  });
-}
-
-function cors(response) {
-  response.headers.set("access-control-allow-origin", "*");
-  response.headers.set("access-control-allow-methods", "GET,POST,OPTIONS");
-  response.headers.set("access-control-allow-headers", "authorization,content-type,x-agent-runner-token");
-  return response;
 }

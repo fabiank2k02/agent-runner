@@ -14,6 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "cleanup:live-test": "node scripts/live-test-cleanup.mjs",
     "test": "vitest run",
     "prepack": "npm run build"
   },

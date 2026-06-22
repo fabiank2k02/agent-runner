@@ -9,4 +9,7 @@ coverage/
 .DS_Store
 .agent-runner/tmp/
 .agent-runner/cache/
+.agent-runner/artifacts/
+contracts/
+design_explorations/
 contract.md
