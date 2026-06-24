@@ -1,58 +1,73 @@
 const tokenKey = "agent-runner-dashboard-token";
+const routes = [
+  { id: "now", label: "Now" },
+  { id: "code", label: "Code" },
+  { id: "jobs", label: "Jobs" },
+  { id: "cloud", label: "Cloud" },
+  { id: "review", label: "Review" },
+  { id: "usage", label: "Usage" }
+];
+const terminalStatuses = new Set(["completed", "failed", "stopped"]);
+let suppressNextHashChange = false;
+let sessionTokenLoadPromise = null;
+
 const state = {
+  route: routeFromHash(),
+  previousRoute: routeFromHash(),
   token: localStorage.getItem(tokenKey) || "",
   sessionToken: "",
-  view: "now",
   jobs: [],
-  threads: [],
   activity: [],
   processedStreams: [],
-  memories: [],
   processorStatus: null,
-  selectedMemoryId: null,
-  selectedId: null,
-  selectedThreadId: null,
+  selectedJobId: null,
   detailJob: null,
   detailHistory: [],
-  detailThread: null,
   detailRawChunks: [],
-  detailLatestActivity: [],
-  linkedRunnerJob: null,
-  eventFilter: "activity",
-  seenEvents: new Map(),
+  detailError: null,
   loading: false,
   error: null,
   lastUpdatedAt: null
 };
 
-const elements = {
-  refreshButton: document.querySelector("#refresh-button"),
-  viewTabs: document.querySelector(".view-tabs"),
-  workspace: document.querySelector(".workspace"),
-  jobs: document.querySelector("#jobs"),
-  detail: document.querySelector("#detail"),
-  lastUpdated: document.querySelector("#last-updated"),
-  jobCount: document.querySelector("#job-count"),
-  listEyebrow: document.querySelector("#list-eyebrow"),
-  listTitle: document.querySelector("#list-title"),
-  running: document.querySelector("#metric-running"),
-  stuck: document.querySelector("#metric-stuck"),
-  completed: document.querySelector("#metric-completed"),
-  failed: document.querySelector("#metric-failed")
-};
+const app = document.querySelector("#app");
 
-elements.refreshButton.addEventListener("click", () => loadDashboard());
-for (const button of elements.viewTabs.querySelectorAll("[data-view]")) {
-  button.addEventListener("click", () => {
-    state.view = button.dataset.view;
-    render();
-    if (state.view === "jobs" && state.selectedId) {
-      loadDetail(state.selectedId, { preserveList: true });
-    } else if (state.view === "threads" && state.selectedThreadId) {
-      loadThreadDetail(state.selectedThreadId, { preserveList: true });
-    }
-  });
-}
+app.addEventListener("click", (event) => {
+  const routeButton = event.target.closest("[data-route]");
+  if (routeButton) {
+    setRoute(routeButton.dataset.route);
+    return;
+  }
+
+  const refreshButton = event.target.closest("[data-refresh]");
+  if (refreshButton) {
+    loadDashboard();
+    return;
+  }
+
+  const jobButton = event.target.closest("[data-job-id]");
+  if (jobButton) {
+    selectJob(jobButton.dataset.jobId);
+  }
+});
+
+app.addEventListener("submit", (event) => {
+  if (event.target.matches("[data-disabled-composer]")) {
+    event.preventDefault();
+  }
+});
+
+window.addEventListener("hashchange", () => {
+  const nextRoute = routeFromHash();
+  if (suppressNextHashChange && nextRoute === state.route) {
+    suppressNextHashChange = false;
+    return;
+  }
+  suppressNextHashChange = false;
+  state.previousRoute = state.route;
+  state.route = nextRoute;
+  render();
+});
 
 setInterval(() => {
   if (!state.loading) {
@@ -63,1626 +78,1047 @@ setInterval(() => {
 render();
 loadDashboard();
 
-async function loadJobs(options = {}) {
-  return loadDashboard(options);
+function routeFromHash() {
+  const raw = window.location.hash.replace(/^#\/?/, "").toLowerCase();
+  return routes.some((route) => route.id === raw) ? raw : "now";
+}
+
+function setRoute(route) {
+  if (!routes.some((item) => item.id === route)) {
+    route = "now";
+  }
+  if (state.route === route) {
+    render();
+    return;
+  }
+  state.previousRoute = state.route;
+  state.route = route;
+  suppressNextHashChange = true;
+  window.location.hash = route;
+  render();
 }
 
 async function loadDashboard(options = {}) {
   state.loading = true;
   state.error = null;
-  setRefreshing(true);
   if (!options.quiet) {
     render();
   }
 
   try {
-    const [jobsResponse, threadsResponse, activityResponse, processedResponse, memoryResponse] = await Promise.all([
-      api("/api/jobs"),
-      api("/api/threads").catch(() => ({ threads: [] })),
+    const [jobsResponse, activityResponse, processedResponse] = await Promise.all([
+      api("/api/jobs?limit=12"),
       api("/api/activity").catch(() => ({ activity: [] })),
-      api("/api/processed-streams").catch(() => ({ streams: [] })),
-      api("/api/memory").catch(() => ({ memories: [] }))
+      api("/api/processed-streams").catch(() => ({ streams: [] }))
     ]);
-    state.jobs = jobsResponse.jobs || [];
-    state.threads = threadsResponse.threads || [];
-    state.activity = activityResponse.activity || [];
-    state.processedStreams = processedResponse.streams || [];
-    state.memories = memoryResponse.memories || [];
-    if (!state.memories.some((memory) => memory.id === state.selectedMemoryId)) {
-      state.selectedMemoryId = state.memories[0]?.id || null;
-    }
-    const projectSlug = currentProjectSlug();
-    state.processorStatus = projectSlug
-      ? await api("/api/processor?projectSlug=" + encodeURIComponent(projectSlug)).catch(() => null)
-      : null;
-    if (!state.jobs.some((job) => job.id === state.selectedId)) {
-      state.selectedId = state.jobs[0]?.id || null;
+    state.jobs = Array.isArray(jobsResponse.jobs) ? jobsResponse.jobs : [];
+    state.activity = Array.isArray(activityResponse.activity) ? activityResponse.activity : [];
+    state.processedStreams = Array.isArray(processedResponse.streams) ? processedResponse.streams : [];
+    if (!state.jobs.some((job) => job.id === state.selectedJobId)) {
+      state.selectedJobId = preferredJob(state.jobs)?.id || null;
       state.detailJob = null;
       state.detailHistory = [];
-    }
-    if (!state.threads.some((thread) => thread.id === state.selectedThreadId)) {
-      state.selectedThreadId = state.threads[0]?.id || null;
-      state.detailThread = null;
       state.detailRawChunks = [];
-      state.detailLatestActivity = [];
-      state.linkedRunnerJob = null;
+    }
+
+    const projectSlug = currentProjectSlug();
+    state.processorStatus = await api("/api/processor?projectSlug=" + encodeURIComponent(projectSlug)).catch((error) => ({
+      projectSlug,
+      error: error.message || String(error)
+    }));
+
+    if (state.selectedJobId) {
+      await loadSelectedDetail(state.selectedJobId);
     }
     state.lastUpdatedAt = new Date();
-    render();
-    if (state.view === "jobs" && state.selectedId) {
-      await loadDetail(state.selectedId, { preserveList: true });
-    } else if (state.view === "threads" && state.selectedThreadId) {
-      await loadThreadDetail(state.selectedThreadId, { preserveList: true });
-    }
   } catch (error) {
     state.error = error;
-    if (!options.quiet) {
-      renderError(error, "list");
-    }
   } finally {
     state.loading = false;
-    setRefreshing(false);
     render();
   }
 }
 
-async function loadDetail(id, options = {}) {
-  state.selectedId = id;
-  if (!options.preserveList) {
-    render();
-  }
-
+async function loadSelectedDetail(id) {
+  state.detailError = null;
   try {
     const data = await api("/api/jobs/" + encodeURIComponent(id));
-    state.detailJob = data.job;
-    state.detailHistory = data.history || [];
-    state.detailRawChunks = data.rawChunks || [];
-    renderDetail(data.job, data.history || [], data.rawChunks || []);
+    state.detailJob = data.job || null;
+    state.detailHistory = Array.isArray(data.history) ? data.history : [];
+    state.detailRawChunks = Array.isArray(data.rawChunks) ? data.rawChunks : [];
   } catch (error) {
-    renderError(error, "detail");
+    state.detailError = error;
+    state.detailJob = null;
+    state.detailHistory = [];
+    state.detailRawChunks = [];
   }
 }
 
-async function loadThreadDetail(id, options = {}) {
-  state.selectedThreadId = id;
-  if (!options.preserveList) {
-    render();
+async function selectJob(id) {
+  if (!id || state.selectedJobId === id) {
+    return;
   }
-
-  try {
-    const data = await api("/api/threads/" + encodeURIComponent(id));
-    state.detailThread = data.thread;
-    state.detailRawChunks = data.rawChunks || [];
-    state.detailLatestActivity = data.latestActivity || [];
-    state.linkedRunnerJob = data.linkedRunnerJob || null;
-    renderThreadDetail(data.thread, data.rawChunks || [], data.latestActivity || [], data.linkedRunnerJob || null);
-  } catch (error) {
-    renderError(error, "detail");
-  }
+  state.selectedJobId = id;
+  state.detailJob = null;
+  state.detailHistory = [];
+  state.detailRawChunks = [];
+  state.detailError = null;
+  render();
+  await loadSelectedDetail(id);
+  render();
 }
 
-async function api(path) {
-  const headers = {};
+async function api(path, options = {}) {
+  const retryAuth = options.retryAuth !== false;
+  const headers = { accept: "application/json" };
   const token = state.token || state.sessionToken;
-  if (token) {
-    headers.authorization = "Bearer " + token;
-  }
-  const response = await fetch(path, { headers });
-  const data = await response.json().catch(() => ({}));
-  if (response.status === 401 && !state.token && !state.sessionToken) {
+  if (!token) {
     const loaded = await loadAccessSessionToken();
     if (loaded) {
       return api(path);
     }
+    throw new Error("Dashboard auth required");
+  }
+  if (token) {
+    headers.authorization = "Bearer " + token;
+  }
+  const response = await fetch(path, { headers });
+  const contentType = response.headers.get("content-type") || "";
+  const data = contentType.includes("application/json") ? await response.json().catch(() => ({})) : {};
+  if (retryAuth && shouldRefreshAccessToken(response, contentType)) {
+    if (state.token) {
+      localStorage.removeItem(tokenKey);
+      state.token = "";
+    }
+    state.sessionToken = "";
+    const loaded = await loadAccessSessionToken({ force: true });
+    if (loaded) {
+      return api(path, { retryAuth: false });
+    }
   }
   if (!response.ok) {
-    throw new Error(data.error || response.statusText);
+    throw new Error(data.error || response.statusText || "Dashboard request failed");
+  }
+  if (!contentType.includes("application/json")) {
+    throw new Error("Expected JSON from " + path);
   }
   return data;
 }
 
-async function loadAccessSessionToken() {
+function shouldRefreshAccessToken(response, contentType) {
+  return response.status === 401 || response.status === 403 || !contentType.includes("application/json");
+}
+
+async function loadAccessSessionToken(options = {}) {
+  if (options.force) {
+    state.sessionToken = "";
+    sessionTokenLoadPromise = null;
+  }
+  if (state.sessionToken) {
+    return true;
+  }
+  if (sessionTokenLoadPromise) {
+    return sessionTokenLoadPromise;
+  }
+  sessionTokenLoadPromise = loadAccessSessionTokenOnce();
   try {
-    const response = await fetch("/session/token", {
-      headers: { accept: "application/json" }
-    });
+    return await sessionTokenLoadPromise;
+  } finally {
+    sessionTokenLoadPromise = null;
+  }
+}
+
+async function loadAccessSessionTokenOnce() {
+  try {
+    const response = await fetch("/session/token", { headers: { accept: "application/json" } });
     const contentType = response.headers.get("content-type") || "";
-    if (!contentType.includes("application/json")) {
-      window.location.assign("/");
+    if (!response.ok || !contentType.includes("application/json")) {
       return false;
     }
     const data = await response.json().catch(() => ({}));
-    if (response.ok && data?.token) {
+    if (data?.token) {
       state.sessionToken = data.token;
       return true;
     }
   } catch {
-    window.location.assign("/");
+    return false;
   }
   return false;
 }
 
 function render() {
-  renderViewTabs();
-  elements.workspace.classList.toggle("now-mode", state.view === "now");
-  renderMetrics();
-  if (state.view === "now") {
-    renderNow();
-  } else if (state.view === "threads") {
-    renderThreads();
-  } else if (state.view === "memory") {
-    renderMemory();
-  } else if (state.view === "processor") {
-    renderProcessor();
-  } else {
-    renderJobs();
-  }
-  renderFreshness();
-  if (state.view === "jobs" && !state.selectedId) {
-    elements.detail.className = "detail";
-    elements.detail.innerHTML = state.loading ? detailSkeleton() : emptyDetail();
-  } else if (state.view === "threads" && !state.selectedThreadId) {
-    elements.detail.className = "detail";
-    elements.detail.innerHTML = state.loading ? detailSkeleton() : emptyState("No local threads", "Local Codex telemetry will appear after the local service uploads.");
-  } else if (state.view === "now") {
-    renderNowDetail();
-  } else if (state.view === "memory") {
-    renderMemoryDetail();
-  } else if (state.view === "processor") {
-    renderProcessorDetail();
-  }
-}
-
-function renderViewTabs() {
-  for (const button of elements.viewTabs.querySelectorAll("[data-view]")) {
-    button.classList.toggle("active", button.dataset.view === state.view);
-  }
-}
-
-function renderMetrics() {
-  const attention = attentionItems();
-  elements.running.textContent = state.jobs.filter((job) => job.status === "running" && !job.isStuck).length;
-  elements.stuck.textContent = attention.length;
-  elements.completed.textContent = state.jobs.filter((job) => job.status === "completed").length;
-  elements.failed.textContent = state.jobs.filter((job) => job.status === "failed").length;
-}
-
-function renderFreshness() {
-  if (!state.lastUpdatedAt) {
-    elements.lastUpdated.textContent = "Never updated";
-    return;
-  }
-  elements.lastUpdated.textContent = "Updated " + formatRefreshTime(state.lastUpdatedAt);
-  elements.lastUpdated.title = state.lastUpdatedAt.toISOString();
-}
-
-function renderNow() {
-  elements.listEyebrow.textContent = "Surface";
-  elements.listTitle.textContent = "Now";
-  const items = surfaceItems();
-  elements.jobCount.textContent = `${items.length} active`;
-
-  if (state.loading && !items.length) {
-    elements.jobs.innerHTML = nowSkeleton();
-    return;
-  }
-  if (state.error && !items.length) {
-    elements.jobs.innerHTML = errorState(state.error.message || String(state.error), "Unable to load Now");
-    return;
-  }
-  if (!items.length) {
-    elements.jobs.innerHTML = `
-      <section class="now-hero empty-now">
-        <span class="now-glyph" aria-hidden="true"></span>
-        <div>
-          <p class="eyebrow">Now</p>
-          <h2>No active runner or local thread.</h2>
-          <p>Completed jobs, local threads, memory, processor status, and raw inspect data remain available in the tabs.</p>
-        </div>
-      </section>
-    `;
-    return;
-  }
-
-  const primary = items[0];
-  const activeRunner = items.filter((item) => item.kind === "runner-job" && !terminalStatuses().has(item.raw.status));
-  const activeLocal = items.filter((item) => item.kind !== "runner-job" && !terminalStatuses().has(item.raw.status));
-  const projects = projectGroups(items);
-
-  elements.jobs.innerHTML = `
-    <section class="now-hero status-${escapeAttribute(primary.className)}">
-      <span class="now-glyph" aria-hidden="true"></span>
-      <div class="now-copy">
-        <p class="eyebrow">Now</p>
-        <h2>${escapeHtml(nowStatement(primary))}</h2>
-        <div class="now-steps" aria-label="Current state">
-          ${["thinking", "editing", "waiting", "blocked", "done"].map((step) => `
-            <span class="${primary.nowStatus === step || (step === "done" && primary.nowStatus === "completed") ? "active" : ""}">
-              <i aria-hidden="true"></i>${escapeHtml(formatStatus(step))}
-            </span>
-          `).join("")}
-        </div>
-      </div>
-      <button type="button" class="now-action" data-now-kind="${escapeAttribute(primary.kind)}" data-now-id="${escapeAttribute(primary.id)}">View</button>
-    </section>
-
-    <section class="now-group-head">
-      <div>
-        <p class="eyebrow">Active</p>
-        <h2>Runner Jobs</h2>
-      </div>
-      <span>${escapeHtml(activeRunner.length)}</span>
-    </section>
-    <div class="now-card-grid">
-      ${activeRunner.length ? activeRunner.map(nowCard).join("") : emptyInline("No active runner jobs.")}
-    </div>
-
-    <section class="now-group-head">
-      <div>
-        <p class="eyebrow">Local</p>
-        <h2>Codex Threads</h2>
-      </div>
-      <span>${escapeHtml(activeLocal.length)}</span>
-    </section>
-    <div class="now-card-grid">
-      ${activeLocal.length ? activeLocal.map(nowCard).join("") : emptyInline("No active local threads.")}
-    </div>
-
-    <section class="project-strip" aria-label="Project groups">
-      ${projects.map((project) => `
-        <button type="button" class="project-chip" data-project="${escapeAttribute(project.slug)}">
-          <strong>${escapeHtml(project.slug)}</strong>
-          <span>${escapeHtml(project.runner)} runner / ${escapeHtml(project.local)} local</span>
-        </button>
-      `).join("")}
-    </section>
-  `;
-
-  for (const button of elements.jobs.querySelectorAll("[data-now-id]")) {
-    button.addEventListener("click", () => openSurfaceItem(button.dataset.nowKind, button.dataset.nowId));
-  }
-}
-
-function renderNowDetail() {
-  const attention = attentionItems();
-  const usage = state.processorStatus?.accountUsage;
-  const processorWarnings = Array.isArray(state.processorStatus?.warnings) ? state.processorStatus.warnings : [];
-  elements.detail.className = "detail now-side";
-  elements.detail.innerHTML = `
-    <section class="side-panel attention-panel">
-      <div class="block-head">
-        <h3>Attention</h3>
-        <span>${escapeHtml(attention.length)}</span>
-      </div>
-      ${attention.length ? attention.slice(0, 8).map(attentionCard).join("") : emptyState("No attention items", "No stale, failed, blocked, timed-out, or unprocessed telemetry is visible.", { compact: true })}
-    </section>
-    <section class="side-panel usage-panel">
-      <div class="block-head">
-        <h3>Usage</h3>
-        <span>${escapeHtml(usage?.label || "snapshot")}</span>
-      </div>
-      ${usage ? usageMini(usage) : emptyState("No usage snapshot", "Usage cards will render after account status telemetry arrives.", { compact: true })}
-    </section>
-    <section class="side-panel processor-mini">
-      <div class="block-head">
-        <h3>Processor</h3>
-        <span>${escapeHtml(state.processorStatus?.automatic?.paused ? "paused" : "automatic")}</span>
-      </div>
-      <div class="mini-metrics">
-        <div><span>Pending</span><strong>${escapeHtml(state.processorStatus?.cursor?.pendingStreamCount ?? "unknown")}</strong></div>
-        <div><span>Behind</span><strong>${escapeHtml(state.processorStatus?.cursor?.behindBySequence ?? "unknown")}</strong></div>
-        <div><span>Streams</span><strong>${escapeHtml(state.processorStatus?.cursor?.streamCount ?? "unknown")}</strong></div>
-      </div>
-      ${processorWarnings.length ? eventsView(processorWarnings.map(warningEvent), new Set(), "No processor warnings.") : ""}
-    </section>
-  `;
-
-  for (const button of elements.detail.querySelectorAll("[data-attention-kind]")) {
-    button.addEventListener("click", () => openSurfaceItem(button.dataset.attentionKind, button.dataset.attentionId));
-  }
-}
-
-function renderJobs() {
-  elements.listEyebrow.textContent = "Remote runners";
-  elements.listTitle.textContent = "Runner Jobs";
-  elements.jobCount.textContent = `${state.jobs.length} ${state.jobs.length === 1 ? "job" : "jobs"}`;
-  if (state.loading && !state.jobs.length) {
-    elements.jobs.innerHTML = listSkeleton();
-    return;
-  }
-
-  if (state.error && !state.jobs.length) {
-    elements.jobs.innerHTML = errorState(state.error.message || String(state.error), "Unable to load jobs");
-    return;
-  }
-
-  if (!state.jobs.length) {
-    elements.jobs.innerHTML = emptyState("No jobs yet", "Runner updates will appear here after the first ingest.", { compact: true });
-    return;
-  }
-
-  elements.jobs.innerHTML = state.jobs.map((job) => {
-    const telemetry = normalizedTelemetry(job);
-    const percent = progressPercent(job);
-    const status = job.isStuck ? "stuck" : job.status || "unknown";
-    const className = statusClass(status);
-    const activity = job.processed?.latestActivity || telemetry?.currentActivity || job.summary?.currentActivity || job.currentActivity || "No activity reported";
-    const eventCount = telemetry?.events?.length || 0;
-    return `
-      <button class="job-row status-${className} ${job.id === state.selectedId ? "active" : ""}" data-job-id="${escapeAttribute(job.id)}">
-        <span class="job-row-main">
-          <span class="row-leading">
-            <span class="status-dot" aria-hidden="true"></span>
-            <span class="project" title="${escapeAttribute(job.projectSlug)}">${escapeHtml(job.projectSlug)}</span>
-          </span>
-          <span class="status ${className}">${escapeHtml(formatStatus(status))}</span>
-        </span>
-        <span class="job-meta-line">
-          <span class="task-id" title="${escapeAttribute(job.taskId)}">${escapeHtml(job.taskId)}</span>
-          <span class="time">${escapeHtml(formatTime(job.updatedAt))}</span>
-        </span>
-        <span class="activity" title="${escapeAttribute(activity)}">${escapeHtml(activity)}</span>
-        <span class="row-progress">
-          <span class="progress"><span style="width: ${percent}%"></span></span>
-          <span class="progress-label">${escapeHtml(percentDisplay(job))}</span>
-        </span>
-        <span class="job-telemetry-line">
-          <span>${escapeHtml(eventCount ? `${eventCount} events` : "no events")}</span>
-          <span>${escapeHtml(formatProcessedLine(job.processed) || formatRawLine(job.rawTelemetry) || formatSpendSource(telemetry?.spend || job.summary?.cost))}</span>
-        </span>
+  const selected = selectedJob();
+  const activeIndex = Math.max(0, routes.findIndex((route) => route.id === state.route));
+  const activeLeft = (activeIndex * 100) / routes.length;
+  const activeCenter = ((activeIndex + 0.5) * 100) / routes.length;
+  ensureShell();
+  const main = app.querySelector(".page");
+  main.className = `page page-${state.route}`;
+  main.innerHTML = `
+    <div class="page-status">
+      <span class="access-pill"><i></i>Access protected</span>
+      <span>${escapeHtml(freshnessText())}</span>
+      <button class="refresh-control ${state.loading ? "is-loading" : ""}" type="button" data-refresh ${state.loading ? "disabled" : ""}>
+        <span></span>Refresh
       </button>
-    `;
-  }).join("");
-
-  for (const row of elements.jobs.querySelectorAll("[data-job-id]")) {
-    row.addEventListener("click", () => loadDetail(row.dataset.jobId));
-  }
+    </div>
+    ${state.error ? alertBanner("Dashboard data unavailable", state.error.message || String(state.error)) : ""}
+    ${state.route === "now" ? renderNowPage(selected) : ""}
+    ${state.route === "jobs" ? renderJobsPage(selected) : ""}
+    ${["code", "cloud", "review", "usage"].includes(state.route) ? renderPlaceholderPage() : ""}
+  `;
+  renderNav(activeIndex, activeLeft, activeCenter);
+  state.previousRoute = state.route;
 }
 
-function renderThreads() {
-  elements.listEyebrow.textContent = "Local Codex";
-  elements.listTitle.textContent = "Local Threads";
-  elements.jobCount.textContent = `${state.threads.length} ${state.threads.length === 1 ? "thread" : "threads"}`;
-  if (state.loading && !state.threads.length) {
-    elements.jobs.innerHTML = listSkeleton();
+function ensureShell() {
+  if (app.querySelector(".global-header")) {
     return;
   }
-  if (!state.threads.length) {
-    elements.jobs.innerHTML = emptyState("No local threads", "Run agent-runner telemetry flush or start the local service.", { compact: true });
+  app.innerHTML = `
+    <div class="ambient-grid" aria-hidden="true"></div>
+    <header class="global-header">
+      <a class="brand" href="#now" aria-label="Agent Runner Now">
+        <span class="brand-mark" aria-hidden="true"><span></span></span>
+        <span class="brand-name">Agent Runner</span>
+      </a>
+      <nav class="liquid-nav" aria-label="Primary" style="--tab-count:${routes.length}">
+        <span class="nav-wedge" aria-hidden="true"></span>
+        ${routes.map((route) => navTab(route)).join("")}
+      </nav>
+      <div class="utility-cluster">
+        <button class="icon-button search-icon" type="button" aria-label="Search" disabled></button>
+        <button class="icon-button bell-icon" type="button" aria-label="Notifications" disabled></button>
+        <span class="profile-chip" aria-label="Profile"><span>AR</span><i></i></span>
+      </div>
+    </header>
+    <main class="page"></main>
+  `;
+}
+
+function renderNav(activeIndex, activeLeft, activeCenter) {
+  const nav = app.querySelector(".liquid-nav");
+  if (!nav) {
     return;
   }
-  elements.jobs.innerHTML = state.threads.map((thread) => {
-    const status = thread.status || "unknown";
-    const className = statusClass(status);
-    const title = thread.title || thread.threadId;
-    const activity = thread.processed?.latestActivity || thread.latestActivity || "No local activity reported";
-    return `
-      <button class="job-row thread-row status-${className} ${thread.id === state.selectedThreadId ? "active" : ""}" data-thread-id="${escapeAttribute(thread.id)}">
-        <span class="job-row-main">
-          <span class="row-leading">
-            <span class="status-dot" aria-hidden="true"></span>
-            <span class="project" title="${escapeAttribute(thread.projectSlug)}">${escapeHtml(thread.projectSlug)}</span>
-          </span>
-          <span class="entity-pill">${escapeHtml(formatSourceKind(thread.sourceKind))}</span>
-        </span>
-        <span class="job-meta-line">
-          <span class="task-id" title="${escapeAttribute(title)}">${escapeHtml(title)}</span>
-          <span class="time">${escapeHtml(formatTime(thread.updatedAt))}</span>
-        </span>
-        <span class="activity" title="${escapeAttribute(activity)}">${escapeHtml(activity)}</span>
-        <span class="job-telemetry-line">
-          <span>${escapeHtml(formatStatus(status))}</span>
-          <span>${escapeHtml(formatProcessedLine(thread.processed) || formatRawLine({ rawChunkCount: thread.rawChunkCount, latestRawTelemetryAt: thread.latestRawTelemetryAt, rawStale: thread.freshness?.rawStale }))}</span>
-        </span>
-      </button>
-    `;
-  }).join("");
-  for (const row of elements.jobs.querySelectorAll("[data-thread-id]")) {
-    row.addEventListener("click", () => loadThreadDetail(row.dataset.threadId));
-  }
-}
-
-function renderOverview() {
-  elements.listEyebrow.textContent = "Recent";
-  elements.listTitle.textContent = "Activity";
-  elements.jobCount.textContent = `${state.activity.length} items`;
-  const items = state.activity.length ? state.activity : [
-    ...state.jobs.slice(0, 10).map((job) => ({
-      type: "runner-job",
-      label: "Runner job",
-      id: job.id,
-      projectSlug: job.projectSlug,
-      title: job.taskId,
-      status: job.status,
-      activity: job.currentActivity,
-      updatedAt: job.updatedAt,
-      rawChunkCount: job.rawTelemetry?.rawChunkCount || 0,
-      latestRawTelemetryAt: job.rawTelemetry?.latestRawTelemetryAt
-    })),
-    ...state.threads.slice(0, 10).map((thread) => ({
-      type: thread.sourceKind === "codex-ide-thread" ? "ide-thread" : thread.sourceKind === "local-workspace" ? "workspace" : "cli-thread",
-      label: thread.sourceKind === "codex-ide-thread" ? "IDE thread" : thread.sourceKind === "local-workspace" ? "Workspace telemetry" : "CLI thread",
-      id: thread.id,
-      projectSlug: thread.projectSlug,
-      title: thread.title || thread.threadId,
-      status: thread.status,
-      activity: thread.latestActivity,
-      updatedAt: thread.updatedAt,
-      rawChunkCount: thread.rawChunkCount || 0,
-      latestRawTelemetryAt: thread.latestRawTelemetryAt
-    }))
-  ].sort((left, right) => Date.parse(right.updatedAt || "") - Date.parse(left.updatedAt || ""));
-  if (!items.length) {
-    elements.jobs.innerHTML = emptyState("No activity", "Runner jobs and local threads will appear here after ingest.", { compact: true });
-    return;
-  }
-  elements.jobs.innerHTML = items.map((item) => `
-    <button class="job-row activity-row status-${statusClass(item.status)}" data-activity-type="${escapeAttribute(item.type)}" data-activity-id="${escapeAttribute(item.id)}">
-      <span class="job-row-main">
-        <span class="row-leading">
-          <span class="status-dot" aria-hidden="true"></span>
-          <span class="project">${escapeHtml(item.projectSlug)}</span>
-        </span>
-        <span class="entity-pill">${escapeHtml(item.label)}</span>
-      </span>
-      <span class="job-meta-line">
-        <span class="task-id" title="${escapeAttribute(item.title)}">${escapeHtml(item.title)}</span>
-        <span class="time">${escapeHtml(formatTime(item.updatedAt))}</span>
-      </span>
-      <span class="activity">${escapeHtml(item.activity || "No activity reported")}</span>
-      <span class="job-telemetry-line">
-        <span>${escapeHtml(formatStatus(item.status))}</span>
-        <span>${escapeHtml(formatRawLine(item))}</span>
-      </span>
-    </button>
-  `).join("");
-  for (const row of elements.jobs.querySelectorAll("[data-activity-id]")) {
-    row.addEventListener("click", () => {
-      if (row.dataset.activityType === "runner-job") {
-        state.view = "jobs";
-        loadDetail(row.dataset.activityId);
-      } else {
-        state.view = "threads";
-        loadThreadDetail(row.dataset.activityId);
-      }
-    });
-  }
-}
-
-function renderMemory() {
-  elements.listEyebrow.textContent = "Project";
-  elements.listTitle.textContent = "Memory";
-  elements.jobCount.textContent = `${state.memories.length} ${state.memories.length === 1 ? "item" : "items"}`;
-  if (!state.memories.length) {
-    elements.jobs.innerHTML = emptyState("No project memory", "Durable facts will appear after repeated or explicit evidence is processed.", { compact: true });
-    return;
-  }
-  elements.jobs.innerHTML = state.memories.map((memory) => `
-    <button class="job-row memory-row ${memory.id === state.selectedMemoryId ? "active" : ""}" data-memory-id="${escapeAttribute(memory.id)}">
-      <span class="job-row-main">
-        <span class="row-leading">
-          <span class="status-dot" aria-hidden="true"></span>
-          <span class="project">${escapeHtml(formatStatus(memory.memoryKind))}</span>
-        </span>
-        <span class="entity-pill">${escapeHtml(memory.evidenceStrength || "observed")}</span>
-      </span>
-      <span class="job-meta-line">
-        <span class="task-id" title="${escapeAttribute(memory.title)}">${escapeHtml(memory.title)}</span>
-        <span class="time">${escapeHtml(formatTime(memory.updatedAt))}</span>
-      </span>
-      <span class="activity" title="${escapeAttribute(memory.body)}">${escapeHtml(memory.body)}</span>
-      <span class="job-telemetry-line">
-        <span>${escapeHtml(memory.modelConfidence ? `${memory.modelConfidence} model confidence` : "evidence based")}</span>
-        <span>${escapeHtml(`${memory.evidence?.length || 0} evidence`)}</span>
-      </span>
-    </button>
-  `).join("");
-  for (const row of elements.jobs.querySelectorAll("[data-memory-id]")) {
-    row.addEventListener("click", () => {
-      state.selectedMemoryId = row.dataset.memoryId;
-      render();
-    });
-  }
-}
-
-function renderProcessor() {
-  const status = state.processorStatus || {};
-  const cursor = status.cursor || {};
-  const warnings = Array.isArray(status.warnings) ? status.warnings : [];
-  elements.listEyebrow.textContent = "Processing";
-  elements.listTitle.textContent = "Status";
-  elements.jobCount.textContent = status.projectSlug || "current project";
-  elements.jobs.innerHTML = `
-    <button class="job-row active">
-      <span class="job-row-main">
-        <span class="row-leading">
-          <span class="status-dot" aria-hidden="true"></span>
-          <span class="project">Automatic</span>
-        </span>
-        <span class="entity-pill">${escapeHtml(status.automatic?.paused ? "paused" : "enabled")}</span>
-      </span>
-      <span class="activity">${escapeHtml(status.automatic?.mode || "wake on ingest or local loop")}</span>
-    </button>
-    <button class="job-row">
-      <span class="job-row-main">
-        <span class="row-leading">
-          <span class="status-dot" aria-hidden="true"></span>
-          <span class="project">Cursor</span>
-        </span>
-        <span class="entity-pill">${escapeHtml(`${cursor.pendingStreamCount ?? 0} pending`)}</span>
-      </span>
-      <span class="activity">${escapeHtml(`raw ${cursor.latestRawSequence ?? "n/a"} / processed ${cursor.latestProcessedSequence ?? "n/a"}`)}</span>
-    </button>
-    ${warnings.map((warning) => `
-      <button class="job-row status-stuck">
-        <span class="job-row-main">
-          <span class="row-leading">
-            <span class="status-dot" aria-hidden="true"></span>
-            <span class="project">${escapeHtml(formatStatus(warning.kind))}</span>
-          </span>
-          <span class="status stuck">${escapeHtml(warning.severity || "warning")}</span>
-        </span>
-        <span class="activity">${escapeHtml(warning.message || "")}</span>
-      </button>
-    `).join("")}
-  `;
-}
-
-function renderDetail(job, history, rawChunks = []) {
-  const summary = job.summary || {};
-  const telemetry = normalizedTelemetry(job);
-  const status = job.isStuck ? "stuck" : job.status || "unknown";
-  const className = statusClass(status);
-  const percent = progressPercent(job);
-  const activity = job.processed?.latestActivity || telemetry?.currentActivity || summary.currentActivity || job.currentActivity || "No activity reported";
-  const events = telemetry?.events || [];
-  const files = telemetry?.files?.length ? telemetry.files : aggregateFilesFromEvents(events);
-  const spend = telemetry?.spend || summary.cost || {};
-  const goals = telemetry?.goals?.length ? telemetry.goals : summary.goals || [];
-  const subgoals = telemetry?.subgoals?.length ? telemetry.subgoals : summary.subgoals || [];
-  const newEventIds = unseenEventIds(job.id, events);
-
-  elements.detail.className = `detail status-${className}`;
-  elements.detail.innerHTML = `
-    <div class="detail-head status-${className}">
-      <div class="detail-title">
-        <p class="eyebrow" title="${escapeAttribute(job.projectSlug)}">${escapeHtml(job.projectSlug)}</p>
-        <h2 title="${escapeAttribute(job.taskId)}">${escapeHtml(job.taskId)}</h2>
-        <p class="detail-subline">${escapeHtml(detailSubline(job))}</p>
-      </div>
-      <span class="status ${className}">${escapeHtml(formatStatus(status))}</span>
-    </div>
-
-    <section class="activity-hero status-${className}">
-      <div class="activity-copy">
-        <span class="section-label">Current activity</span>
-        <p>${escapeHtml(activity)}</p>
-      </div>
-      <div class="progress-readout">
-        <strong>${escapeHtml(formatPercent(percent))}</strong>
-        <span>${escapeHtml(progressSourceLabel(job))}</span>
-      </div>
-      <div class="progress large"><span style="width: ${percent}%"></span></div>
-    </section>
-
-    <section class="detail-grid" aria-label="Job detail metrics">
-      <div><span>Progress</span><strong>${escapeHtml(percentDisplay(job))}</strong></div>
-      <div><span>ETA</span><strong>${escapeHtml(formatEta(summary))}</strong></div>
-      <div><span>Codex</span><strong>${escapeHtml(formatUsd(spend.codexTaskAllocationUsd ?? spend.codexTokenCostUsd))}</strong></div>
-      <div><span>Tokens</span><strong>${escapeHtml(formatTokens(spend))}</strong></div>
-      <div><span>Started</span><strong>${escapeHtml(formatTime(job.startedAt))}</strong></div>
-      <div><span>Finished</span><strong>${escapeHtml(formatTime(job.finishedAt))}</strong></div>
-      <div><span>Exit</span><strong>${escapeHtml(job.exitCode ?? "n/a")}</strong></div>
-      <div><span>Last Seen</span><strong>${escapeHtml(formatTime(job.lastSeenAt))}</strong></div>
-    </section>
-
-    <div class="detail-body">
-      ${processedBlock(job.processed)}
-      ${spendBlock(spend)}
-      ${rawTelemetryBlock(job.rawTelemetry, rawChunks, "Runner Raw Telemetry")}
-      ${goalsBlock(goals, subgoals, percent)}
-      ${telemetryBlock(events, files, newEventIds)}
-      ${historyBlock(history)}
-      ${logBlock(job.logTail)}
-    </div>
-  `;
-
-  for (const button of elements.detail.querySelectorAll("[data-filter]")) {
-    button.addEventListener("click", () => {
-      state.eventFilter = button.dataset.filter;
-      renderDetail(job, history);
-    });
-  }
-  markEventsSeen(job.id, events);
-}
-
-function renderThreadDetail(thread, rawChunks, latestActivity, linkedRunnerJob) {
-  const status = thread.status || "unknown";
-  const className = statusClass(status);
-  const title = thread.title || thread.threadId;
-  const usage = thread.processed?.tokenUsage || thread.tokenUsage || {};
-  const activity = thread.processed?.latestActivity || thread.latestActivity || "No local activity reported";
-  elements.detail.className = `detail status-${className}`;
-  elements.detail.innerHTML = `
-    <div class="detail-head status-${className}">
-      <div class="detail-title">
-        <p class="eyebrow">${escapeHtml(formatSourceKind(thread.sourceKind))}</p>
-        <h2 title="${escapeAttribute(title)}">${escapeHtml(title)}</h2>
-        <p class="detail-subline">${escapeHtml(threadSubline(thread))}</p>
-      </div>
-      <span class="status ${className}">${escapeHtml(formatStatus(status))}</span>
-    </div>
-
-    <section class="activity-hero status-${className}">
-      <div class="activity-copy">
-        <span class="section-label">Latest local activity</span>
-        <p>${escapeHtml(activity)}</p>
-      </div>
-      <div class="progress-readout">
-        <strong>${escapeHtml(formatTokens(usage))}</strong>
-        <span>tokens observed</span>
-      </div>
-      <div class="progress large"><span style="width: ${thread.freshness?.rawStale ? 35 : 100}%"></span></div>
-    </section>
-
-    <section class="detail-grid" aria-label="Thread detail metrics">
-      <div><span>Source</span><strong>${escapeHtml(formatSourceKind(thread.sourceKind))}</strong></div>
-      <div><span>Project</span><strong>${escapeHtml(thread.projectSlug)}</strong></div>
-      <div><span>Raw Chunks</span><strong>${escapeHtml(thread.rawChunkCount || rawChunks.length || 0)}</strong></div>
-      <div><span>Freshness</span><strong>${escapeHtml(thread.freshness?.rawStale ? "stale" : "fresh")}</strong></div>
-      <div><span>Created</span><strong>${escapeHtml(formatTime(thread.createdAt))}</strong></div>
-      <div><span>Updated</span><strong>${escapeHtml(formatTime(thread.updatedAt))}</strong></div>
-      <div><span>Last Raw</span><strong>${escapeHtml(formatTime(thread.latestRawTelemetryAt))}</strong></div>
-      <div><span>Linked Job</span><strong>${escapeHtml(thread.linkedRunnerJobId || "none")}</strong></div>
-    </section>
-
-    <div class="detail-body">
-      ${processedBlock(thread.processed)}
-      ${linkedRunnerJobBlock(linkedRunnerJob)}
-      ${localActivityBlock(latestActivity)}
-      ${filesBlock(rawChunks)}
-      ${rawTelemetryBlock({
-        latestRawTelemetryAt: thread.latestRawTelemetryAt,
-        rawChunkCount: thread.rawChunkCount,
-        rawPayloadAvailable: rawChunks.length > 0,
-        rawStale: thread.freshness?.rawStale
-      }, rawChunks, "Local Raw Telemetry")}
-    </div>
-  `;
-}
-
-function renderOverviewDetail() {
-  const activeJobs = state.jobs.filter((job) => job.status === "running");
-  const staleJobs = state.jobs.filter((job) => job.rawTelemetry?.rawStale);
-  const staleThreads = state.threads.filter((thread) => thread.freshness?.rawStale);
-  const staleProcessed = [
-    ...state.jobs.filter((job) => job.processed?.freshness?.processedStale || job.rawTelemetry?.rawAvailableButUnprocessed),
-    ...state.threads.filter((thread) => thread.freshness?.processedStale)
-  ];
-  elements.detail.className = "detail";
-  elements.detail.innerHTML = `
-    <div class="detail-head">
-      <div class="detail-title">
-        <p class="eyebrow">Overview</p>
-        <h2>Telemetry Freshness</h2>
-        <p class="detail-subline">Runner jobs and local Codex activity are tracked as separate streams.</p>
-      </div>
-      <span class="status ${staleJobs.length || staleThreads.length ? "stuck" : "completed"}">${escapeHtml(staleJobs.length || staleThreads.length ? "Needs attention" : "Fresh")}</span>
-    </div>
-    <section class="detail-grid" aria-label="Overview metrics">
-      <div><span>Active Jobs</span><strong>${escapeHtml(activeJobs.length)}</strong></div>
-      <div><span>Local Threads</span><strong>${escapeHtml(state.threads.length)}</strong></div>
-      <div><span>Stale Runner Raw</span><strong>${escapeHtml(staleJobs.length)}</strong></div>
-      <div><span>Stale Local Raw</span><strong>${escapeHtml(staleThreads.length)}</strong></div>
-      <div><span>Processed Streams</span><strong>${escapeHtml(state.processedStreams.length)}</strong></div>
-      <div><span>Processed Behind</span><strong>${escapeHtml(staleProcessed.length)}</strong></div>
-      <div><span>Memory Items</span><strong>${escapeHtml(state.memories.length)}</strong></div>
-      <div><span>Processor</span><strong>${escapeHtml(state.processorStatus?.automatic?.paused ? "paused" : "automatic")}</strong></div>
-    </section>
-    <div class="detail-body">
-      ${accountUsageBlock(state.processorStatus?.accountUsage)}
-      ${processorStatusBlock(state.processorStatus)}
-      ${memorySummaryBlock(state.memories)}
-      <section class="block">
-        <div class="block-head">
-          <h3>Recent Mixed Activity</h3>
-          <span>${escapeHtml(state.activity.length || "local")}</span>
-        </div>
-        ${state.activity.length ? eventsView(state.activity.slice(0, 20).map(activityFeedEvent), new Set(), "No activity yet.") : emptyState("No mixed activity", "Runner jobs and local threads will appear after ingest.", { compact: true })}
-      </section>
-    </div>
-  `;
-}
-
-function renderMemoryDetail() {
-  const memory = state.memories.find((item) => item.id === state.selectedMemoryId) || state.memories[0];
-  elements.detail.className = "detail";
-  if (!memory) {
-    elements.detail.innerHTML = emptyState("No project memory", "Durable facts will appear after processing has enough evidence.");
-    return;
-  }
-  elements.detail.innerHTML = `
-    <div class="detail-head">
-      <div class="detail-title">
-        <p class="eyebrow">${escapeHtml(formatStatus(memory.memoryKind))}</p>
-        <h2 title="${escapeAttribute(memory.title)}">${escapeHtml(memory.title)}</h2>
-        <p class="detail-subline">${escapeHtml(memory.modelConfidence ? `${memory.modelConfidence} model confidence` : `${memory.evidenceStrength || "observed"} evidence`)}</p>
-      </div>
-      <span class="status ${memory.supersededBy ? "stopped" : "completed"}">${escapeHtml(memory.supersededBy ? "Superseded" : "Active")}</span>
-    </div>
-    <section class="activity-hero">
-      <div class="activity-copy">
-        <span class="section-label">Memory</span>
-        <p>${escapeHtml(memory.body)}</p>
-      </div>
-      <div class="progress-readout">
-        <strong>${escapeHtml(memory.evidence?.length || 0)}</strong>
-        <span>evidence pointers</span>
-      </div>
-      <div class="progress large"><span style="width: ${memory.supersededBy ? 45 : 100}%"></span></div>
-    </section>
-    <div class="detail-body">
-      <section class="block">
-        <div class="block-head">
-          <h3>Evidence</h3>
-          <span>${escapeHtml(memory.evidenceStrength || "observed")}</span>
-        </div>
-        ${memory.evidence?.length ? eventsView(memory.evidence.map(memoryEvidenceEvent), new Set(), "No evidence pointers.") : emptyState("No evidence", "This memory item has no stored evidence pointers.", { compact: true })}
-      </section>
-    </div>
-  `;
-}
-
-function renderProcessorDetail() {
-  const status = state.processorStatus;
-  elements.detail.className = "detail";
-  if (!status) {
-    elements.detail.innerHTML = emptyState("No processor status", "Processor status will appear after dashboard processing is configured.");
-    return;
-  }
-  const cursor = status.cursor || {};
-  const lease = status.lease || {};
-  const lastRun = status.lastRun || {};
-  elements.detail.innerHTML = `
-    <div class="detail-head">
-      <div class="detail-title">
-        <p class="eyebrow">Processor Status</p>
-        <h2>${escapeHtml(status.projectSlug || "Project")}</h2>
-        <p class="detail-subline">${escapeHtml(status.automatic?.mode || "wake on ingest or local loop")}</p>
-      </div>
-      <span class="status ${lease.expired || !lease.ownerId ? "unknown" : "running"}">${escapeHtml(lease.ownerId ? "Lease observed" : "No active lease")}</span>
-    </div>
-    <section class="detail-grid" aria-label="Processor metrics">
-      <div><span>Pending Streams</span><strong>${escapeHtml(cursor.pendingStreamCount ?? "unknown")}</strong></div>
-      <div><span>Raw Cursor</span><strong>${escapeHtml(cursor.latestRawSequence ?? "unknown")}</strong></div>
-      <div><span>Processed Cursor</span><strong>${escapeHtml(cursor.latestProcessedSequence ?? "unknown")}</strong></div>
-      <div><span>Model Mode</span><strong>${escapeHtml(status.model?.mode || "deterministic-only")}</strong></div>
-      <div><span>Lease Owner</span><strong>${escapeHtml(lease.ownerId || "none")}</strong></div>
-      <div><span>Lease Expiry</span><strong>${escapeHtml(formatTime(lease.expiresAt))}</strong></div>
-      <div><span>Last Run</span><strong>${escapeHtml(lastRun.status || "none")}</strong></div>
-      <div><span>Last Error</span><strong>${escapeHtml(lastRun.errors?.[0] || "none")}</strong></div>
-    </section>
-    <div class="detail-body">
-      ${accountUsageBlock(status.accountUsage)}
-      ${processorStatusBlock(status)}
-    </div>
-  `;
-}
-
-function spendBlock(spend) {
-  if (!spend || typeof spend !== "object") {
-    return emptyPanel("Spend", "No spend telemetry has arrived yet.");
-  }
-  const total = spend.totalOperationalCostUsd ?? spend.totalEstimatedCostUsd;
-  return `
-    <section class="block spend-block">
-      <div class="block-head">
-        <h3>Spend</h3>
-        <span>${escapeHtml(formatSpendSource(spend))}</span>
-      </div>
-      <div class="spend-grid">
-        <div>
-          <span>Weekly Codex Budget</span>
-          <strong>${escapeHtml(formatUsd(spend.codexWeeklyBudgetUsd))}</strong>
-          <small>${escapeHtml(spend.codexWeeklyBudgetFormula || formatSeatLine(spend))}</small>
-        </div>
-        <div>
-          <span>Task Codex Cost</span>
-          <strong>${escapeHtml(formatUsd(spend.codexTaskAllocationUsd ?? spend.codexTokenCostUsd))}</strong>
-          <small>${escapeHtml(formatAllocationShare(spend))}</small>
-        </div>
-        <div>
-          <span>DigitalOcean</span>
-          <strong>${escapeHtml(formatUsd(spend.digitalOceanCostUsd))}</strong>
-          <small>${escapeHtml(formatMinutes(spend.elapsedMinutes))}</small>
-        </div>
-        <div>
-          <span>Total Ops Estimate</span>
-          <strong>${escapeHtml(formatUsd(total))}</strong>
-          <small>${escapeHtml(formatRemaining(spend))}</small>
-        </div>
-      </div>
-    </section>
-  `;
-}
-
-function processedBlock(processed) {
-  if (!processed) {
-    return emptyPanel("Processed Summary", "No processed read model has been built for this stream yet.");
-  }
-  const blockers = Array.isArray(processed.blockers) ? processed.blockers : [];
-  const files = Array.isArray(processed.files) ? processed.files : [];
-  return `
-    <section class="block processed-block">
-      <div class="block-head">
-        <h3>Processed Summary</h3>
-        <span>${escapeHtml(`through ${processed.processedThroughSequence || 0}`)}</span>
-      </div>
-      <div class="processed-summary">
-        <p>${escapeHtml(processed.summary || "No processed summary available.")}</p>
-        ${processed.nextAction ? `<strong>${escapeHtml(processed.nextAction)}</strong>` : ""}
-        <small>${escapeHtml(`Calculated ${formatTime(processed.processedAt)} / ${processed.deterministicVersion || "deterministic"}`)}</small>
-      </div>
-      <div class="raw-summary">
-        <div><span>Status</span><strong>${escapeHtml(formatStatus(processed.status))}</strong></div>
-        <div><span>Blockers</span><strong>${escapeHtml(blockers.length)}</strong></div>
-        <div><span>Files</span><strong>${escapeHtml(files.length)}</strong></div>
-        <div><span>Tokens</span><strong>${escapeHtml(formatTokens(processed.tokenUsage))}</strong></div>
-      </div>
-      ${blockers.length ? eventsView(blockers.slice(-6).map(blockerEvent), new Set(), "No blocker signals extracted.") : ""}
-    </section>
-  `;
-}
-
-function accountUsageBlock(usage) {
-  const latest = usage?.latest;
-  if (!latest) {
-    return emptyPanel("Account Usage And Limits", "No Codex rate-limit or status snapshot has arrived yet. Weekly, 5h, burn, and cost cards will populate after account telemetry is ingested.");
-  }
-  const weekly = usage.weekly || latest.weeklyRemaining || {};
-  const rolling = usage.rolling5h || latest.rolling5hRemaining || {};
-  const burn = usage.burn || {};
-  const subscription = usage.subscription || {};
-  return `
-    <section class="block usage-block">
-      <div class="block-head">
-        <h3>Account Usage And Limits</h3>
-        <span>${escapeHtml(usage.label || "unknown")}</span>
-      </div>
-      <div class="usage-grid">
-        <div>
-          <span>Weekly Remaining</span>
-          <strong>${escapeHtml(formatLimitRemaining(weekly))}</strong>
-          <small>${escapeHtml(formatResetAndMethod(weekly.resetAt || latest.reset?.weeklyResetAt, weekly.method))}</small>
-        </div>
-        <div>
-          <span>Weekly Used</span>
-          <strong>${escapeHtml(formatLimitUsed(weekly))}</strong>
-          <small>${escapeHtml(formatLimitTokens(weekly))}</small>
-        </div>
-        <div>
-          <span>5-hour Remaining</span>
-          <strong>${escapeHtml(formatLimitRemaining(rolling))}</strong>
-          <small>${escapeHtml(formatResetAndMethod(rolling.resetAt || latest.reset?.rolling5hResetAt, rolling.method))}</small>
-        </div>
-        <div>
-          <span>5-hour Used</span>
-          <strong>${escapeHtml(formatLimitUsed(rolling))}</strong>
-          <small>${escapeHtml(formatLimitTokens(rolling))}</small>
-        </div>
-        <div>
-          <span>Burn Last Hour</span>
-          <strong>${escapeHtml(formatTokenBurn(burn.lastHour))}</strong>
-          <small>${escapeHtml(formatBurnRate(burn.lastHour))}</small>
-        </div>
-        <div>
-          <span>Burn 5h / Week</span>
-          <strong>${escapeHtml(`${formatTokenBurn(burn.rolling5h)} / ${formatTokenBurn(burn.week)}`)}</strong>
-          <small>${escapeHtml(formatLimitEta(usage.estimatedHoursUntilLimit))}</small>
-        </div>
-        <div>
-          <span>Codex Weekly Budget</span>
-          <strong>${escapeHtml(formatUsd(subscription.weeklyBudgetUsd))}</strong>
-          <small>${escapeHtml(subscription.formula || "subscription formula unknown")}</small>
-        </div>
-        <div>
-          <span>Snapshot Count</span>
-          <strong>${escapeHtml(usage.snapshots?.length ?? 0)}</strong>
-          <small>${escapeHtml(formatTime(latest.collectedAt))}</small>
-        </div>
-      </div>
-    </section>
-  `;
-}
-
-function processorStatusBlock(status) {
-  if (!status) {
-    return emptyPanel("Processor Status", "No processor status has been reported.");
-  }
-  const cursor = status.cursor || {};
-  const lastRun = status.lastRun || {};
-  const warnings = Array.isArray(status.warnings) ? status.warnings : [];
-  return `
-    <section class="block processor-block">
-      <div class="block-head">
-        <h3>Processor Status</h3>
-        <span>${escapeHtml(status.automatic?.paused ? "paused" : "automatic")}</span>
-      </div>
-      <div class="raw-summary">
-        <div><span>Pending</span><strong>${escapeHtml(cursor.pendingStreamCount ?? "unknown")}</strong></div>
-        <div><span>Behind</span><strong>${escapeHtml(cursor.behindBySequence ?? "unknown")}</strong></div>
-        <div><span>Last Run</span><strong>${escapeHtml(lastRun.status || "none")}</strong></div>
-        <div><span>Model</span><strong>${escapeHtml(status.model?.mode || "deterministic-only")}</strong></div>
-      </div>
-      ${warnings.length ? eventsView(warnings.map(warningEvent), new Set(), "No processor warnings.") : ""}
-    </section>
-  `;
-}
-
-function memorySummaryBlock(memories) {
-  const active = memories.filter((memory) => !memory.supersededBy);
-  if (!active.length) {
-    return emptyPanel("Project Memory", "No active memory items have been extracted yet.");
-  }
-  return `
-    <section class="block memory-block">
-      <div class="block-head">
-        <h3>Project Memory</h3>
-        <span>${escapeHtml(`${active.length} active`)}</span>
-      </div>
-      <div class="memory-list">
-        ${active.slice(0, 6).map((memory) => `
-          <div class="memory-card">
-            <strong title="${escapeAttribute(memory.title)}">${escapeHtml(memory.title)}</strong>
-            <p title="${escapeAttribute(memory.body)}">${escapeHtml(memory.body)}</p>
-            <span>${escapeHtml(memory.modelConfidence ? `${memory.modelConfidence} model confidence` : `${memory.evidenceStrength || "observed"} evidence`)}</span>
-          </div>
-        `).join("")}
-      </div>
-    </section>
-  `;
-}
-
-function goalsBlock(goals, subgoals, fallbackPercent) {
-  const safeGoals = Array.isArray(goals) ? goals : [];
-  const safeSubgoals = Array.isArray(subgoals) ? subgoals : [];
-  if (!safeGoals.length) {
-    return emptyPanel("Goals", "Structured contract goals have not arrived yet.");
-  }
-  const complete = safeGoals.filter((goal) => goal.state === "complete").length;
-  const progress = safeGoals.length ? Math.round((complete / safeGoals.length) * 100) : fallbackPercent;
-  const active = safeGoals.find((goal) => goal.state === "active");
-  const blocked = safeGoals.filter((goal) => goal.state === "blocked");
-  return `
-    <section class="block goals-block">
-      <div class="block-head">
-        <h3>Contract Goals</h3>
-        <span>${escapeHtml(`${complete}/${safeGoals.length} complete`)}</span>
-      </div>
-      <div class="goal-overview">
-        <div>
-          <strong>${escapeHtml(formatPercent(progress))}</strong>
-          <span>goal progress</span>
-        </div>
-        <div>
-          <strong>${escapeHtml(active?.label || "No active goal reported")}</strong>
-          <span>active goal</span>
-        </div>
-        <div>
-          <strong>${escapeHtml(blocked.length ? `${blocked.length} blocked` : "No blockers")}</strong>
-          <span>goal blockers</span>
-        </div>
-      </div>
-      <div class="goals-list">
-        ${safeGoals.map((goal) => goalRow(goal, safeSubgoals.filter((subgoal) => subgoal.parentId === goal.id))).join("")}
-      </div>
-      ${safeSubgoals.some((subgoal) => !subgoal.parentId) ? `
-        <div class="subgoal-orphans">
-          <span class="section-label">Observed subgoals</span>
-          ${safeSubgoals.filter((subgoal) => !subgoal.parentId).slice(0, 8).map((subgoal) => goalRow(subgoal, [], true)).join("")}
-        </div>
-      ` : ""}
-    </section>
-  `;
-}
-
-function goalRow(goal, subgoals = [], compact = false) {
-  return `
-    <div class="goal-row state-${escapeAttribute(goal.state || "unknown")} ${compact ? "compact" : ""}">
-      <span class="goal-state-dot" aria-hidden="true"></span>
-      <div>
-        <strong title="${escapeAttribute(goal.label)}">${escapeHtml(goal.label)}</strong>
-        <span>${escapeHtml(formatGoalMeta(goal))}</span>
-        ${subgoals.length ? `<div class="nested-subgoals">${subgoals.slice(0, 4).map((subgoal) => goalRow(subgoal, [], true)).join("")}</div>` : ""}
-      </div>
-    </div>
-  `;
-}
-
-function telemetryBlock(events, files, newEventIds) {
-  const commands = events.filter((event) => ["command_started", "command_finished", "tool_call"].includes(event.type));
-  const errors = events.filter((event) => event.type === "error" || event.severity === "error");
-  const tabs = [
-    ["activity", "Activity", events.length],
-    ["files", "Files", files.length],
-    ["commands", "Commands", commands.length],
-    ["errors", "Errors", errors.length]
-  ];
-  const filter = tabs.some((tab) => tab[0] === state.eventFilter) ? state.eventFilter : "activity";
-  state.eventFilter = filter;
-  return `
-    <section class="block telemetry-block">
-      <div class="block-head">
-        <h3>Live Transcript</h3>
-        <span>${escapeHtml(events.length ? `${events.length} events` : "empty telemetry")}</span>
-      </div>
-      <div class="tabs" role="tablist" aria-label="Telemetry filters">
-        ${tabs.map(([id, label, count]) => `
-          <button class="${id === filter ? "active" : ""}" type="button" data-filter="${escapeAttribute(id)}">
-            <span>${escapeHtml(label)}</span>
-            <strong>${escapeHtml(count)}</strong>
-          </button>
-        `).join("")}
-      </div>
-      ${filter === "files" ? filesView(files) : filter === "commands" ? eventsView(commands, newEventIds, "No command events yet.") : filter === "errors" ? eventsView(errors, newEventIds, "No errors observed.") : eventsView(events, newEventIds, "Structured activity has not arrived yet.")}
-    </section>
-  `;
-}
-
-function eventsView(events, newEventIds, emptyText) {
-  if (!events.length) {
-    return emptyState("No structured events", emptyText, { compact: true });
-  }
-  return `
-    <div class="event-list">
-      ${events.slice().reverse().map((event) => eventRow(event, newEventIds.has(event.id))).join("")}
-    </div>
-  `;
-}
-
-function eventRow(event, isNew) {
-  const commandText = event.command?.text || "";
-  const detail = event.detail || commandText || event.tool?.name || "";
-  return `
-    <div class="event-row severity-${escapeAttribute(event.severity || "info")} type-${escapeAttribute(event.type || "tool_call")} ${isNew ? "is-new" : ""}">
-      <span class="event-rail" aria-hidden="true"></span>
-      <div class="event-main">
-        <div class="event-title-line">
-          <strong>${escapeHtml(event.label || formatEventType(event.type))}</strong>
-          <span>${escapeHtml(formatTime(event.timestamp))}</span>
-        </div>
-        ${event.filePath ? `<p class="event-path" title="${escapeAttribute(event.filePath)}">${escapeHtml(event.filePath)}</p>` : ""}
-        ${detail ? `<p title="${escapeAttribute(detail)}">${escapeHtml(detail)}</p>` : ""}
-        <div class="event-meta">
-          <span>${escapeHtml(formatEventType(event.type))}</span>
-          <span>${escapeHtml(formatEvidenceLabel(event.confidence))}</span>
-          ${event.inferred ? "<span>inferred</span>" : ""}
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function filesView(files) {
-  if (!files.length) {
-    return emptyState("No file activity", "File reads and edits will appear after structured telemetry arrives.", { compact: true });
-  }
-  return `
-    <div class="files-table" role="table" aria-label="Files touched">
-      <div class="files-head" role="row">
-        <span>Path</span>
-        <span>Action</span>
-        <span>Counts</span>
-        <span>Seen</span>
-      </div>
-      ${files.map((file) => `
-        <div class="file-row action-${escapeAttribute(file.latestAction || "read")}" role="row">
-          <span class="file-path" title="${escapeAttribute(file.path)}">${escapeHtml(file.path)}</span>
-          <span>${escapeHtml(formatFileAction(file.latestAction))}</span>
-          <span>${escapeHtml(formatFileCounts(file))}</span>
-          <span title="${escapeAttribute(file.source || "")}">${escapeHtml(formatTime(file.lastSeenAt))} / ${escapeHtml(formatEvidenceLabel(file.confidence || (file.source === "raw" ? "observed" : "low")))}</span>
-        </div>
-      `).join("")}
-    </div>
-  `;
-}
-
-function historyBlock(history) {
-  return `
-    <section class="block">
-      <div class="block-head">
-        <h3>Observer History</h3>
-        <span>${history.length}</span>
-      </div>
-      <div class="history">
-        ${history.length ? history.map((item) => {
-          const activity = item.summary?.currentActivity || "No activity summary";
-          const percent = item.summary?.progressPercent == null ? "unknown" : formatPercent(item.summary.progressPercent);
-          return `
-            <div class="history-row">
-              <span class="history-time">${escapeHtml(formatTime(item.receivedAt))}</span>
-              <strong>${escapeHtml(percent)}</strong>
-              <span class="history-activity" title="${escapeAttribute(activity)}">${escapeHtml(activity)}</span>
-            </div>
-          `;
-        }).join("") : '<div class="muted padded">No durable summaries yet</div>'}
-      </div>
-    </section>
-  `;
-}
-
-function rawTelemetryBlock(rawTelemetry, chunks, title = "Raw Telemetry") {
-  const raw = rawTelemetry || {};
-  const count = raw.rawChunkCount ?? chunks.length ?? 0;
-  return `
-    <section class="block raw-block">
-      <div class="block-head">
-        <h3>${escapeHtml(title)}</h3>
-        <span>${escapeHtml(formatRawLine(raw) || "no raw chunks")}</span>
-      </div>
-      <div class="raw-summary">
-        <div><span>Last Raw</span><strong>${escapeHtml(formatTime(raw.latestRawTelemetryAt))}</strong></div>
-        <div><span>Chunks</span><strong>${escapeHtml(count)}</strong></div>
-        <div><span>Status</span><strong>${escapeHtml(raw.rawStatus || (raw.rawStale ? "stale" : "available"))}</strong></div>
-        <div><span>Storage</span><strong>${escapeHtml(chunks.some((chunk) => chunk.storedInR2) ? "R2" : chunks.length ? "D1 fallback" : "none")}</strong></div>
-      </div>
-      ${chunks.length ? `
-        <div class="raw-table" role="table" aria-label="Raw telemetry chunks">
-          <div class="raw-row raw-head" role="row">
-            <span>Seq</span>
-            <span>Generated</span>
-            <span>Bytes</span>
-            <span>Hash</span>
-            <span>Object</span>
-          </div>
-          ${chunks.slice(0, 12).map((chunk) => `
-            <div class="raw-row" role="row">
-              <span>${escapeHtml(chunk.sequence)}</span>
-              <span>${escapeHtml(formatTime(chunk.generatedAt))}</span>
-              <span>${escapeHtml(formatBytes(chunk.byteSize))}</span>
-              <span title="${escapeAttribute(chunk.sha256)}">${escapeHtml((chunk.sha256 || "").slice(0, 12))}</span>
-              <span title="${escapeAttribute(chunk.r2Key || "D1 inline fallback")}">${escapeHtml(chunk.r2Key || "inline")}</span>
-            </div>
-          `).join("")}
-        </div>
-      ` : emptyState("No raw chunks", "Raw telemetry metadata has not arrived yet.", { compact: true })}
-    </section>
-  `;
-}
-
-function linkedRunnerJobBlock(job) {
-  if (!job) {
-    return emptyPanel("Linked Runner Job", "No related remote runner job has been linked to this local thread.");
-  }
-  return `
-    <section class="block">
-      <div class="block-head">
-        <h3>Linked Runner Job</h3>
-        <span>${escapeHtml(formatStatus(job.status))}</span>
-      </div>
-      <div class="linked-job">
-        <strong>${escapeHtml(job.id)}</strong>
-        <span>${escapeHtml(job.currentActivity || "No runner activity reported")}</span>
-        <small>${escapeHtml(formatTime(job.updatedAt))}</small>
-      </div>
-    </section>
-  `;
-}
-
-function localActivityBlock(items) {
-  if (!items.length) {
-    return emptyPanel("Local Activity", "No prompt, message, or command snippets are available for this thread.");
-  }
-  return `
-    <section class="block">
-      <div class="block-head">
-        <h3>Local Activity</h3>
-        <span>${escapeHtml(items.length)}</span>
-      </div>
-      <div class="event-list">
-        ${items.slice().reverse().map((item) => `
-          <div class="event-row severity-info type-${escapeAttribute(item.type)}">
-            <span class="event-rail" aria-hidden="true"></span>
-            <div class="event-main">
-              <div class="event-title-line">
-                <strong>${escapeHtml(formatStatus(item.type))}</strong>
-                <span>local</span>
-              </div>
-              <p title="${escapeAttribute(item.text || "")}">${escapeHtml(item.text || "No detail")}</p>
-            </div>
-          </div>
-        `).join("")}
-      </div>
-    </section>
-  `;
-}
-
-function filesBlock(chunks) {
-  const files = [];
-  for (const chunk of chunks) {
-    const preview = chunk.inlinePreview || {};
-    for (const file of preview.files || []) {
-      const value = typeof file === "string" ? { path: file } : file;
-      if (value?.path) {
-        files.push({
-          path: value.path,
-          latestAction: value.status || value.latestAction || "observed",
-          readCount: 0,
-          editCount: 0,
-          createCount: 0,
-          deleteCount: 0,
-          patchCount: 0,
-          lastSeenAt: chunk.generatedAt,
-          confidence: "observed",
-          source: "raw"
-        });
-      }
+  nav.style.setProperty("--active-index", String(activeIndex));
+  nav.style.setProperty("--active-left", `${activeLeft}%`);
+  nav.style.setProperty("--active-center", `${activeCenter}%`);
+  nav.style.setProperty("--tab-count", String(routes.length));
+  const wedge = nav.querySelector(".nav-wedge");
+  if (wedge) {
+    const navBox = nav.getBoundingClientRect();
+    const currentBox = wedge.getBoundingClientRect();
+    const currentLeft = currentBox.left - navBox.left;
+    const tabWidth = navBox.width / routes.length;
+    const edgeOffset = window.matchMedia("(max-width: 720px)").matches ? 7 : 12;
+    const nextLeft = activeIndex * tabWidth - edgeOffset;
+    const delta = currentLeft - nextLeft;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (wedge._navAnimationTimer) {
+      clearTimeout(wedge._navAnimationTimer);
+      wedge._navAnimationTimer = null;
+    }
+    wedge.style.left = `${nextLeft}px`;
+    if (!reducedMotion && Math.abs(delta) > 1) {
+      const duration = 360;
+      const startedAt = performance.now();
+      const tick = () => {
+        const progress = clamp((performance.now() - startedAt) / duration, 0, 1);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        const offset = delta * (1 - eased);
+        wedge.style.transform = `translateX(${offset}px)`;
+        if (progress < 1) {
+          wedge._navAnimationTimer = setTimeout(tick, 16);
+        } else {
+          wedge.style.transform = "";
+          wedge._navAnimationTimer = null;
+        }
+      };
+      wedge.style.transform = `translateX(${delta}px)`;
+      wedge._navAnimationTimer = setTimeout(tick, 16);
+    } else {
+      wedge.style.transform = "";
     }
   }
-  if (!files.length) {
-    return emptyPanel("Files", "No referenced or changed files were included in the latest local telemetry.");
+  for (const button of nav.querySelectorAll("[data-route]")) {
+    const active = button.dataset.route === state.route;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-current", active ? "page" : "false");
   }
+}
+
+function navTab(route) {
+  const active = route.id === state.route;
   return `
-    <section class="block">
-      <div class="block-head">
-        <h3>Files</h3>
-        <span>${escapeHtml(files.length)}</span>
+    <button class="nav-tab ${active ? "active" : ""}" type="button" data-route="${escapeAttribute(route.id)}" aria-current="${active ? "page" : "false"}">
+      <span>${escapeHtml(route.label)}</span>
+    </button>
+  `;
+}
+
+function renderNowPage(job) {
+  if (state.loading && !state.jobs.length) {
+    return skeletonNow();
+  }
+  if (!state.jobs.length) {
+    return `
+      <section class="now-layout empty-now-layout">
+        ${emptyPanel("No active jobs", "Runner jobs will appear here after ingest. Live values remain unavailable until production telemetry arrives.")}
+      </section>
+      ${renderInstrumentRow(null)}
+    `;
+  }
+
+  const jobs = carouselJobs(job);
+  const previous = jobs.previous;
+  const next = jobs.next;
+  return `
+    <div class="now-stage">
+      ${previous ? renderCarouselArrow(previous, "previous") : ""}
+      <section class="now-layout">
+        ${previous ? renderSideJobCard(previous, "previous") : `<div class="side-job-card side-job-placeholder">${emptyMini("No previous job")}</div>`}
+        ${renderSelectedNowCard(job)}
+        ${next ? renderSideJobCard(next, "next") : `<div class="side-job-card side-job-placeholder">${emptyMini("No next job")}</div>`}
+      </section>
+      ${next ? renderCarouselArrow(next, "next") : ""}
+    </div>
+    <div class="carousel-dots" aria-label="Job carousel position">
+      ${state.jobs.slice(0, 7).map((item) => `
+        <button type="button" data-job-id="${escapeAttribute(item.id)}" class="${item.id === job?.id ? "active" : ""}" aria-label="${escapeAttribute(jobTitle(item))}"></button>
+      `).join("")}
+    </div>
+    ${renderInstrumentRow(job)}
+  `;
+}
+
+function renderCarouselArrow(job, direction) {
+  return `
+    <button class="carousel-arrow ${escapeAttribute(direction)}" type="button" data-job-id="${escapeAttribute(job.id)}" aria-label="${direction === "previous" ? "Previous" : "Next"} job: ${escapeAttribute(jobTitle(job))}">
+      <span aria-hidden="true"></span>
+    </button>
+  `;
+}
+
+function renderSelectedNowCard(job) {
+  const status = displayStatus(job);
+  const percent = completionPercent(job);
+  const goals = jobGoals(job);
+  const subgoals = jobSubgoals(job);
+  const current = currentSubgoal(job);
+  const remaining = remainingGoals(job);
+  return `
+    <article class="selected-job-card glass-panel status-${escapeAttribute(statusClass(status))}">
+      <div class="job-card-topline">
+        <span class="live-dot"></span>
+        <span>${escapeHtml(status === "running" ? "Active job" : "Selected job")}</span>
+        <span class="job-id">Job ID: ${escapeHtml(shortId(job?.id))}</span>
+        ${statusChip(status)}
       </div>
-      ${filesView(files.slice(0, 80))}
+      <div class="job-title-row">
+        <div>
+          <h1>${escapeHtml(jobTitle(job))}</h1>
+          <p class="job-branch"><span class="branch-icon"></span>${escapeHtml(jobBranch(job))}</p>
+        </div>
+        <button class="review-button" type="button" disabled>Review</button>
+      </div>
+      <div class="stat-grid now-stats">
+        ${statCell("Elapsed", elapsedText(job), "clock")}
+        ${statCell("ETA", etaText(job), "hourglass")}
+        ${statCell("Total completion", percent === null ? "Pending" : formatPercent(percent), "progress")}
+        ${statCell("Remaining", remaining === null ? "No data" : `${remaining} ${remaining === 1 ? "goal" : "goals"}`, "list")}
+      </div>
+      <section class="current-strip">
+        <div>
+          <span>Current subgoal</span>
+          <strong>${escapeHtml(current.label)}</strong>
+        </div>
+        <div class="pulse-line" aria-hidden="true"><i></i></div>
+        <span class="eta-note">ETA ${escapeHtml(etaText(job, { short: true }))}</span>
+      </section>
+      <div class="selected-job-body">
+        <div class="completion-readout">
+          ${progressArc(percent)}
+          <strong>${escapeHtml(percent === null ? "Pending" : formatPercent(percent))}</strong>
+          <span>Total completion</span>
+        </div>
+        <section class="goal-board">
+          <div class="panel-head">
+            <h2>Contract goals</h2>
+            <span>${escapeHtml(goals.length ? `${remaining ?? 0} remaining` : "Unavailable")}</span>
+          </div>
+          ${renderGoalRows(goals, subgoals, { limit: 5 })}
+        </section>
+      </div>
+    </article>
+  `;
+}
+
+function renderSideJobCard(job, position) {
+  const percent = completionPercent(job);
+  const remaining = remainingGoals(job);
+  const goals = jobGoals(job);
+  return `
+    <button class="side-job-card glass-panel ${escapeAttribute(position)} status-${escapeAttribute(statusClass(displayStatus(job)))}" type="button" data-job-id="${escapeAttribute(job.id)}" aria-label="Select ${escapeAttribute(jobTitle(job))}">
+      <div class="mini-job-head">
+        <span class="job-icon ${escapeAttribute(jobIconClass(job))}"></span>
+        <div>
+          <strong>${escapeHtml(jobTitle(job))}</strong>
+          <span>${escapeHtml(jobBranch(job))}</span>
+        </div>
+        ${statusChip(displayStatus(job))}
+      </div>
+      <div class="mini-stat-grid">
+        ${miniStat("Elapsed", elapsedText(job))}
+        ${miniStat("ETA", etaText(job, { short: true }))}
+        ${miniStat("Total", percent === null ? "Pending" : formatPercent(percent))}
+        ${miniStat("Remaining", remaining === null ? "No data" : `${remaining} goals`)}
+      </div>
+      <div class="mini-goals">
+        <span>Contract goals</span>
+        ${goals.length ? renderGoalRows(goals, jobSubgoals(job), { limit: 2, compact: true }) : emptyMini("Goals unavailable")}
+      </div>
+      ${thinProgress(percent)}
+    </button>
+  `;
+}
+
+function renderInstrumentRow(job) {
+  return `
+    <section class="instrument-row">
+      ${usageInstrument(job)}
+      ${cloudInstrument()}
+      ${processorInstrument()}
     </section>
   `;
 }
 
-function logBlock(logTail) {
-  const log = logTail || "";
-  const lineCount = log ? log.split(/\r?\n/).filter(Boolean).length : 0;
+function usageInstrument(job) {
+  const usage = state.processorStatus?.accountUsage;
+  const weekly = usage?.weekly || usage?.latest?.weeklyRemaining || null;
+  const percent = numberOrNull(weekly?.percentRemaining);
+  const burn = usage?.burn || {};
+  const cost = jobCost(job);
+  const costValue = numberOrNull(cost?.codexTaskAllocationUsd ?? cost?.codexCostUsd ?? cost?.totalOperationalCostUsd ?? cost?.totalEstimatedCostUsd);
   return `
-    <details class="log-details">
-      <summary>
-        <span>Inspect raw log tail</span>
-        <span>${escapeHtml(lineCount ? lineCount + " lines" : "No log tail")}</span>
-      </summary>
-      <pre>${escapeHtml(log || "No log tail was included in the latest update.")}</pre>
-    </details>
+    <article class="instrument glass-panel">
+      <div class="panel-head">
+        <h2>Usage</h2>
+        <span>${escapeHtml(usage?.label || "Unavailable")}</span>
+      </div>
+      <div class="usage-instrument-grid">
+        <div class="allowance-meter">
+          ${progressArc(percent)}
+          <strong>${escapeHtml(percent === null ? "No data" : formatPercent(percent))}</strong>
+          <span>Codex allowance</span>
+          <small>${escapeHtml(formatLimitTokens(weekly))}</small>
+        </div>
+        <div class="token-pulse ${burn.lastHour?.tokens ? "" : "is-unavailable"}">
+          <span>Token pulse</span>
+          <div class="sparkline" aria-hidden="true"><i></i></div>
+          <strong>${escapeHtml(formatTokenBurn(burn.lastHour))}</strong>
+          <small>${escapeHtml(burn.lastHour?.tokens ? "last hour" : "No data yet")}</small>
+        </div>
+        <div class="cost-cell">
+          <span>Selected job cost</span>
+          <strong>${escapeHtml(formatUsd(costValue))}</strong>
+          <small>${escapeHtml(costValue === null ? "Unavailable" : formatUsageMethod(cost?.codexCostMethod || cost?.tokenUsageMethod))}</small>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function cloudInstrument() {
+  const cloud = state.processorStatus?.cloudSummary;
+  const storage = cloud?.rawTelemetryStorage;
+  const snapshots = cloud?.snapshotStorage;
+  const runningPods = cloud?.runningPods;
+  const costToday = cloud?.estimatedCostToday;
+  return `
+    <article class="instrument glass-panel">
+      <div class="panel-head">
+        <h2>Cloud costs</h2>
+        <span>${escapeHtml(cloud ? "Job telemetry" : "Unavailable")}</span>
+      </div>
+      <div class="cloud-grid">
+        ${cloudCell("R2 storage", storage ? formatBytes(storage.r2ByteSize) : "No data", storage?.method || "unavailable")}
+        ${cloudCell("Snapshots", snapshots?.available ? formatBytes(snapshots.byteSize) : "No data", snapshots?.method || "unavailable")}
+        ${cloudCell("Running pods", runningPods ? String(runningPods.count) : "No data", runningPods?.method || "unavailable")}
+        ${cloudCell("Est. today", costToday?.available ? formatUsd(costToday.usd) : "No data", costToday?.method || "unavailable")}
+      </div>
+      <div class="instrument-foot">
+        <span>Total telemetry bytes</span>
+        <strong>${escapeHtml(storage ? formatBytes(storage.byteSize) : "No data")}</strong>
+      </div>
+    </article>
+  `;
+}
+
+function processorInstrument() {
+  const status = state.processorStatus;
+  const runtime = status?.runtime || {};
+  const cursor = status?.cursor || {};
+  const health = runtime.health || (status?.error ? "error" : "unavailable");
+  return `
+    <article class="instrument glass-panel">
+      <div class="panel-head">
+        <h2>Processor</h2>
+        <span>${escapeHtml(runtime.mode || "Unavailable")}</span>
+      </div>
+      <div class="processor-select">
+        <span class="job-icon cube"></span>
+        <div>
+          <span>Processor</span>
+          <strong>${escapeHtml(runtime.selectedProcessorInstance || "No active lease")}</strong>
+        </div>
+      </div>
+      <div class="processor-grid">
+        ${processorMetric("Health", formatStatus(health), health)}
+        ${processorMetric("Lease", formatStatus(runtime.leaseStatus || "No data"), runtime.leaseStatus)}
+        ${processorMetric("Pending streams", cursor.pendingStreamCount ?? "No data")}
+        ${processorMetric("Behind", cursor.behindBySequence ?? "No data")}
+        ${processorMetric("Last run", formatRelative(runtime.lastRunAt), runtime.lastRunStatus)}
+      </div>
+    </article>
+  `;
+}
+
+function renderJobsPage(job) {
+  if (state.loading && !state.jobs.length) {
+    return skeletonJobs();
+  }
+  if (!state.jobs.length) {
+    return `
+      <section class="jobs-page empty-jobs-page">
+        ${emptyPanel("No jobs yet", "The work surface will populate after runner ingest creates jobs.")}
+      </section>
+    `;
+  }
+  return `
+    <section class="jobs-page">
+      <aside class="jobs-selector glass-panel">
+        <div class="selector-head">
+          <div>
+            <h1>Jobs</h1>
+            <span>${escapeHtml(`${state.jobs.length} total`)}</span>
+          </div>
+          <span class="auto-refresh"><i></i>Auto refresh 15s</span>
+        </div>
+        ${renderSelectorGroup("Active", state.jobs.filter((item) => !terminalStatuses.has(item.status)).slice(0, 6), job)}
+        ${renderSelectorGroup("Recent", state.jobs.filter((item) => terminalStatuses.has(item.status)).slice(0, 6), job)}
+      </aside>
+      <div class="job-work-column">
+        ${renderJobWorkSurface(job)}
+        ${renderCostOverview(job)}
+      </div>
+      <aside class="job-right-rail">
+        ${renderCurrentGoalPanel(job)}
+        ${renderContractGoalsPanel(job)}
+        ${renderProcessorPanel()}
+        ${renderJobContextPanel(job)}
+        ${renderJobHealthPanel(job)}
+      </aside>
+    </section>
+  `;
+}
+
+function renderSelectorGroup(title, jobs, selected) {
+  return `
+    <section class="selector-group">
+      <h2>${escapeHtml(title)}</h2>
+      ${jobs.length ? jobs.map((job) => renderJobSelectorCard(job, selected?.id === job.id)).join("") : emptyMini(`No ${title.toLowerCase()} jobs`)}
+    </section>
+  `;
+}
+
+function renderJobSelectorCard(job, active) {
+  const percent = completionPercent(job);
+  const remaining = remainingGoals(job);
+  return `
+    <button class="selector-job ${active ? "active" : ""} status-${escapeAttribute(statusClass(displayStatus(job)))}" type="button" data-job-id="${escapeAttribute(job.id)}">
+      <div class="selector-title">
+        <span class="job-icon ${escapeAttribute(jobIconClass(job))}"></span>
+        <div>
+          <strong>${escapeHtml(jobTitle(job))}</strong>
+          <span>${escapeHtml(jobBranch(job))}</span>
+        </div>
+        ${statusChip(displayStatus(job))}
+      </div>
+      ${thinProgress(percent)}
+      <div class="selector-meta">
+        <span>${escapeHtml(elapsedText(job))} elapsed</span>
+        <span>${escapeHtml(etaText(job, { short: true }))}</span>
+        <span>${escapeHtml(remaining === null ? "Goals unavailable" : `${remaining} goals`)}</span>
+      </div>
+    </button>
+  `;
+}
+
+function renderJobWorkSurface(job) {
+  const status = displayStatus(job);
+  const percent = completionPercent(job);
+  const remaining = remainingGoals(job);
+  const current = currentSubgoal(job);
+  const cost = jobCost(job);
+  return `
+    <article class="work-surface glass-panel status-${escapeAttribute(statusClass(status))}">
+      <div class="work-head">
+        <div>
+          <div class="headline-kicker"><span class="live-dot"></span>${escapeHtml(formatStatus(status))}</div>
+          <h1>${escapeHtml(jobTitle(job))} <small>${escapeHtml(jobBranch(job))}</small></h1>
+        </div>
+        <div class="job-id-copy">Job ID: ${escapeHtml(shortId(job?.id))}</div>
+      </div>
+      <div class="stat-grid work-stats">
+        ${statCell("Elapsed", elapsedText(job), "clock")}
+        ${statCell("ETA", etaText(job), "hourglass")}
+        ${statCell("Completion", percent === null ? "Pending" : formatPercent(percent), "progress")}
+        ${statCell("Remaining", remaining === null ? "No data" : `${remaining} goals`, "list")}
+        ${statCell("Token burn", formatTokenRate(job, cost), "bolt")}
+        ${statCell("Est. cost", formatUsd(cost?.totalOperationalCostUsd ?? cost?.totalEstimatedCostUsd ?? cost?.codexCostUsd), "dollar")}
+      </div>
+      <section class="current-strip work-current">
+        <div>
+          <span>Current subgoal</span>
+          <strong>${escapeHtml(current.label)}</strong>
+        </div>
+        <div class="pulse-line" aria-hidden="true"><i></i></div>
+        <span class="eta-note">ETA ${escapeHtml(etaText(job, { short: true }))}</span>
+      </section>
+      ${renderWorkStream(job)}
+    </article>
+  `;
+}
+
+function renderWorkStream(job) {
+  const stream = workStream(job);
+  return `
+    <section class="stream-panel">
+      <div class="panel-head">
+        <h2>Live work stream</h2>
+        <span>${escapeHtml(stream.semantic ? "Live events" : "Preview stream")}</span>
+      </div>
+      ${!stream.semantic ? `<p class="stream-disclaimer">Skeleton from selected job metadata. Semantic log parsing is not complete yet.</p>` : ""}
+      <div class="stream-list">
+        ${stream.events.slice(0, 3).map(streamEventRow).join("")}
+      </div>
+      <form class="disabled-composer" data-disabled-composer>
+        <input type="text" placeholder="Ask about this job..." disabled aria-disabled="true">
+        <button type="submit" disabled aria-label="Ask disabled"><span></span></button>
+      </form>
+    </section>
+  `;
+}
+
+function streamEventRow(event) {
+  return `
+    <article class="stream-event ${escapeAttribute(event.tone || "info")}">
+      <span class="stream-node ${escapeAttribute(event.icon || "search")}"></span>
+      <time>${escapeHtml(event.time || "Pending")}</time>
+      <div>
+        <div class="stream-event-title">
+          <strong>${escapeHtml(event.title)}</strong>
+          <span>${escapeHtml(event.source)}</span>
+        </div>
+        <p>${escapeHtml(event.body)}</p>
+        <div class="artifact-row">
+          ${event.artifact ? `<span class="artifact-chip">${escapeHtml(event.artifact)}</span>` : ""}
+          ${event.command ? `<span class="artifact-chip command">${escapeHtml(event.command)}</span>` : ""}
+          ${event.chip ? `<span class="artifact-chip state">${escapeHtml(event.chip)}</span>` : ""}
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderCostOverview(job) {
+  const cost = jobCost(job);
+  const cloud = state.processorStatus?.cloudSummary;
+  return `
+    <article class="cost-overview glass-panel">
+      <div class="panel-head">
+        <h2>Cost overview</h2>
+        <span>${escapeHtml(cost ? formatUsageMethod(cost.codexCostMethod || cost.tokenUsageMethod) : "Unavailable")}</span>
+      </div>
+      <div class="cost-overview-grid">
+        ${costOverviewCell("Est. cost today", cloud?.estimatedCostToday?.available ? formatUsd(cloud.estimatedCostToday.usd) : "No data", cloud?.estimatedCostToday?.method || "unavailable")}
+        ${costOverviewCell("Selected job", formatUsd(cost?.totalOperationalCostUsd ?? cost?.totalEstimatedCostUsd ?? cost?.codexCostUsd), cost ? formatUsageMethod(cost.codexCostMethod || cost.tokenUsageMethod) : "unavailable")}
+        <div class="cost-rhythm">
+          <span>Cost rhythm (24h)</span>
+          <div class="sparkline cost" aria-hidden="true"><i></i></div>
+          <small>${escapeHtml(cloud?.estimatedCostToday?.available ? "From processed job telemetry" : "Unavailable")}</small>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderCurrentGoalPanel(job) {
+  const goal = currentGoal(job);
+  const percent = goal.percent ?? completionPercent(job);
+  return `
+    <article class="rail-panel glass-panel">
+      <div class="panel-head">
+        <h2>Current goal</h2>
+        <span>${escapeHtml(goal.unavailable ? "Unavailable" : "Active")}</span>
+      </div>
+      <p class="goal-focus">${escapeHtml(goal.label)}</p>
+      ${thinProgress(percent)}
+      <div class="rail-metric-line">
+        <span>ETA</span>
+        <strong>${escapeHtml(etaText(job, { short: true }))}</strong>
+      </div>
+    </article>
+  `;
+}
+
+function renderContractGoalsPanel(job) {
+  const goals = jobGoals(job);
+  return `
+    <article class="rail-panel glass-panel">
+      <div class="panel-head">
+        <h2>Contract goals</h2>
+        <span>${escapeHtml(goals.length ? `${remainingGoals(job) ?? 0} remaining` : "Unavailable")}</span>
+      </div>
+      ${renderGoalRows(goals, jobSubgoals(job), { limit: 5, compact: true })}
+    </article>
+  `;
+}
+
+function renderProcessorPanel() {
+  const status = state.processorStatus;
+  const runtime = status?.runtime || {};
+  const cursor = status?.cursor || {};
+  return `
+    <article class="rail-panel glass-panel">
+      <div class="processor-mini-head">
+        <span class="job-icon cube"></span>
+        <div>
+          <span>Processor</span>
+          <strong>${escapeHtml(runtime.selectedProcessorInstance || "No active lease")}</strong>
+        </div>
+        ${statusChip(runtime.health || "unavailable")}
+      </div>
+      <div class="mini-runtime-grid">
+        ${miniRuntime("Mode", runtime.mode || "Unavailable")}
+        ${miniRuntime("Lease", formatStatus(runtime.leaseStatus || "No data"))}
+        ${miniRuntime("Pending", cursor.pendingStreamCount ?? "No data")}
+        ${miniRuntime("Behind", cursor.behindBySequence ?? "No data")}
+        ${miniRuntime("Last run", formatRelative(runtime.lastRunAt))}
+        ${miniRuntime("Health", formatStatus(runtime.health || "No data"))}
+      </div>
+    </article>
+  `;
+}
+
+function renderJobContextPanel(job) {
+  return `
+    <article class="rail-panel glass-panel context-panel">
+      ${contextRow("Workspace / Repo", job?.projectSlug || "No data")}
+      ${contextRow("Branch", jobBranch(job))}
+      ${contextRow("Remote host", job?.remoteHost || "No data")}
+      ${contextRow("Raw chunks", job?.rawTelemetry?.rawChunkCount ?? state.detailRawChunks.length ?? "No data")}
+    </article>
+  `;
+}
+
+function renderJobHealthPanel(job) {
+  const status = displayStatus(job);
+  const raw = job?.rawTelemetry || {};
+  const latest = latestActivity(job);
+  return `
+    <article class="rail-panel glass-panel">
+      <div class="panel-head">
+        <h2>Job health</h2>
+        ${statusChip(healthForJob(job))}
+      </div>
+      <div class="job-health-grid">
+        ${miniRuntime("Streams", raw.rawChunkCount ?? "No data")}
+        ${miniRuntime("Behind", state.processorStatus?.cursor?.behindBySequence ?? "No data")}
+        ${miniRuntime("Last event", latest ? formatRelative(job?.updatedAt || job?.lastSeenAt) : "No data")}
+      </div>
+      <div class="sparkline health" aria-hidden="true"><i></i></div>
+      <p class="muted-line">${escapeHtml(latest || "No activity reported")}</p>
+    </article>
+  `;
+}
+
+function renderPlaceholderPage() {
+  return `
+    <section class="placeholder-page">
+      <article class="placeholder-card glass-panel">
+        <span class="placeholder-mark" aria-hidden="true"></span>
+        <h1>Not implemented yet</h1>
+      </article>
+    </section>
+  `;
+}
+
+function renderGoalRows(goals, subgoals, options = {}) {
+  const safeGoals = goals.slice(0, options.limit || goals.length);
+  if (!safeGoals.length) {
+    return `
+      <div class="unavailable-list">
+        <div class="goal-row unavailable">
+          <span class="goal-mark"></span>
+          <div>
+            <strong>Contract goals unavailable</strong>
+            <span>No structured goals have arrived from telemetry.</span>
+          </div>
+          <em>Unavailable</em>
+        </div>
+      </div>
+    `;
+  }
+  return `
+    <div class="goal-list ${options.compact ? "compact" : ""}">
+      ${safeGoals.map((goal) => {
+        const children = subgoals.filter((subgoal) => subgoal.parentId && subgoal.parentId === goal.id);
+        return goalRow(goal, children, options.compact);
+      }).join("")}
+    </div>
+  `;
+}
+
+function goalRow(goal, children = [], compact = false) {
+  const stateName = goalState(goal);
+  const percent = goal.percent;
+  return `
+    <div class="goal-row state-${escapeAttribute(stateName)} ${compact ? "compact" : ""}">
+      <span class="goal-mark" style="--p:${percent === null ? 0 : clamp(percent, 0, 100)}"></span>
+      <div>
+        <strong>${escapeHtml(goal.label)}</strong>
+        <span>${escapeHtml(formatStatus(stateName))}${children.length ? ` / ${children.length} subgoals` : ""}</span>
+      </div>
+      <em>${escapeHtml(stateName === "complete" ? "Complete" : percent === null ? "Pending" : formatPercent(percent))}</em>
+    </div>
+  `;
+}
+
+function statCell(label, value, icon) {
+  return `
+    <div class="stat-cell">
+      <span class="stat-icon ${escapeAttribute(icon)}"></span>
+      <div>
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(value)}</strong>
+      </div>
+    </div>
+  `;
+}
+
+function miniStat(label, value) {
+  return `
+    <div class="mini-stat">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+  `;
+}
+
+function cloudCell(label, value, method) {
+  return `
+    <div class="cloud-cell">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <small>${escapeHtml(formatMethodLabel(method))}</small>
+    </div>
+  `;
+}
+
+function processorMetric(label, value, tone = "") {
+  return `
+    <div class="processor-metric tone-${escapeAttribute(statusClass(tone))}">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+  `;
+}
+
+function miniRuntime(label, value) {
+  return `
+    <div>
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+  `;
+}
+
+function contextRow(label, value) {
+  return `
+    <div class="context-row">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+  `;
+}
+
+function costOverviewCell(label, value, method) {
+  return `
+    <div class="cost-overview-cell">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <small>${escapeHtml(formatMethodLabel(method))}</small>
+    </div>
+  `;
+}
+
+function progressArc(percent) {
+  const value = percent === null ? 0 : clamp(percent, 0, 100);
+  return `<span class="progress-arc ${percent === null ? "is-unavailable" : ""}" style="--p:${value}"></span>`;
+}
+
+function thinProgress(percent) {
+  const value = percent === null ? 0 : clamp(percent, 0, 100);
+  return `
+    <div class="thin-progress ${percent === null ? "is-unavailable" : ""}">
+      <span style="width:${value}%"></span>
+    </div>
+  `;
+}
+
+function statusChip(status) {
+  const value = formatStatus(status || "unavailable");
+  return `<span class="status-chip status-${escapeAttribute(statusClass(status))}"><i></i>${escapeHtml(value)}</span>`;
+}
+
+function alertBanner(title, message) {
+  return `
+    <section class="alert-banner glass-panel">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(message)}</span>
+    </section>
   `;
 }
 
 function emptyPanel(title, message) {
   return `
-    <section class="block">
-      <div class="block-head">
-        <h3>${escapeHtml(title)}</h3>
-      </div>
-      ${emptyState(title, message, { compact: true })}
+    <article class="empty-panel glass-panel">
+      <span class="placeholder-mark" aria-hidden="true"></span>
+      <h1>${escapeHtml(title)}</h1>
+      <p>${escapeHtml(message)}</p>
+    </article>
+  `;
+}
+
+function emptyMini(message) {
+  return `<div class="empty-mini">${escapeHtml(message)}</div>`;
+}
+
+function skeletonNow() {
+  return `
+    <section class="now-layout">
+      <div class="side-job-card glass-panel skeleton-card"></div>
+      <article class="selected-job-card glass-panel skeleton-card large"></article>
+      <div class="side-job-card glass-panel skeleton-card"></div>
+    </section>
+    <div class="carousel-dots"><button class="active"></button><button></button><button></button></div>
+    <section class="instrument-row">
+      <article class="instrument glass-panel skeleton-card"></article>
+      <article class="instrument glass-panel skeleton-card"></article>
+      <article class="instrument glass-panel skeleton-card"></article>
     </section>
   `;
 }
 
-function renderError(error, scope = "detail") {
-  const message = error.message || String(error);
-  elements.detail.className = "detail";
-  if (scope === "list") {
-    elements.jobs.innerHTML = errorState(message, "Unable to load jobs");
-  }
-  elements.detail.innerHTML = errorState(message, "Dashboard request failed");
-}
-
-function setRefreshing(value) {
-  elements.refreshButton.setAttribute("aria-busy", value ? "true" : "false");
-  elements.refreshButton.classList.toggle("is-loading", value);
-  elements.refreshButton.disabled = value && !state.jobs.length;
-}
-
-function listSkeleton() {
-  return Array.from({ length: 6 }, () => `
-    <div class="job-row skeleton-row" aria-hidden="true">
-      <span class="skeleton-line w-80"></span>
-      <span class="skeleton-line w-50"></span>
-      <span class="skeleton-line w-95"></span>
-      <span class="skeleton-line w-70"></span>
-    </div>
-  `).join("");
-}
-
-function detailSkeleton() {
+function skeletonJobs() {
   return `
-    <div class="detail-skeleton" aria-label="Loading job detail">
-      <div class="skeleton-panel head">
-        <span class="skeleton-line w-30"></span>
-        <span class="skeleton-line w-70"></span>
-        <span class="skeleton-line w-45"></span>
+    <section class="jobs-page">
+      <aside class="jobs-selector glass-panel skeleton-card"></aside>
+      <div class="job-work-column">
+        <article class="work-surface glass-panel skeleton-card large"></article>
+        <article class="cost-overview glass-panel skeleton-card"></article>
       </div>
-      <div class="skeleton-panel hero">
-        <span class="skeleton-line w-20"></span>
-        <span class="skeleton-line w-90"></span>
-        <span class="skeleton-line w-60"></span>
-      </div>
-      <div class="skeleton-grid">
-        ${Array.from({ length: 8 }, () => '<span class="skeleton-cell"></span>').join("")}
-      </div>
-    </div>
-  `;
-}
-
-function emptyDetail() {
-  return emptyState("Select a job", "Job details will appear here.");
-}
-
-function emptyState(title, message, options = {}) {
-  return `
-    <div class="empty-state ${options.compact ? "compact" : ""}">
-      <strong>${escapeHtml(title)}</strong>
-      <span>${escapeHtml(message)}</span>
-    </div>
-  `;
-}
-
-function errorState(message, title) {
-  return `
-    <div class="error-state">
-      <strong>${escapeHtml(title)}</strong>
-      <span>${escapeHtml(message)}</span>
-    </div>
-  `;
-}
-
-function surfaceItems() {
-  const jobs = state.jobs.map((job) => {
-    const telemetry = normalizedTelemetry(job);
-    const activity = job.processed?.latestActivity || telemetry?.currentActivity || job.summary?.currentActivity || job.currentActivity || "";
-    const nowStatus = deriveNowStatus(job.status, activity, {
-      stale: job.rawTelemetry?.rawStale,
-      blocked: Boolean(job.processed?.blockers?.length || job.summary?.blockers?.length),
-      failed: job.status === "failed",
-      completed: job.status === "completed"
-    });
-    return {
-      id: job.id,
-      kind: "runner-job",
-      label: "Runner job",
-      projectSlug: job.projectSlug,
-      title: job.taskId,
-      activity: activity || "No runner activity reported",
-      status: job.status || "unknown",
-      nowStatus,
-      className: nowStatusClass(nowStatus),
-      updatedAt: job.updatedAt,
-      meta: [
-        job.remoteHost || "",
-        job.rawTelemetry?.rawStale ? "stale raw" : formatRawLine(job.rawTelemetry),
-        formatProcessedLine(job.processed)
-      ].filter(Boolean).join(" / "),
-      raw: job
-    };
-  });
-  const threads = state.threads.map((thread) => {
-    const activity = thread.processed?.latestActivity || thread.latestActivity || "";
-    const nowStatus = deriveNowStatus(thread.status, activity, {
-      stale: thread.freshness?.rawStale,
-      blocked: Boolean(thread.processed?.blockers?.length),
-      failed: thread.status === "failed",
-      completed: thread.status === "completed"
-    });
-    return {
-      id: thread.id,
-      kind: "local-thread",
-      label: formatSourceKind(thread.sourceKind),
-      projectSlug: thread.projectSlug,
-      title: thread.title || thread.threadId,
-      activity: activity || "No local activity reported",
-      status: thread.status || "unknown",
-      nowStatus,
-      className: nowStatusClass(nowStatus),
-      updatedAt: thread.updatedAt,
-      meta: [
-        thread.linkedRunnerJobId ? `linked ${thread.linkedRunnerJobId}` : "",
-        thread.freshness?.rawStale ? "stale raw" : formatRawLine({ rawChunkCount: thread.rawChunkCount, latestRawTelemetryAt: thread.latestRawTelemetryAt }),
-        formatProcessedLine(thread.processed)
-      ].filter(Boolean).join(" / "),
-      raw: thread
-    };
-  });
-  return [...jobs, ...threads]
-    .filter((item) => item.status !== "completed" || item.nowStatus === "failed")
-    .sort((left, right) => attentionRank(right) - attentionRank(left) || Date.parse(right.updatedAt || "") - Date.parse(left.updatedAt || ""));
-}
-
-function nowCard(item) {
-  return `
-    <button class="now-card status-${escapeAttribute(item.className)} ${item.kind === "local-thread" ? "local-card" : "runner-card"}" type="button" data-now-kind="${escapeAttribute(item.kind)}" data-now-id="${escapeAttribute(item.id)}">
-      <span class="now-avatar">${escapeHtml(item.kind === "runner-job" ? initials(item.projectSlug) : "LT")}</span>
-      <span class="now-card-main">
-        <span class="now-card-title">
-          <strong title="${escapeAttribute(item.title)}">${escapeHtml(item.title)}</strong>
-          <span class="status ${escapeAttribute(item.className)}">${escapeHtml(formatStatus(item.nowStatus))}</span>
-        </span>
-        <span class="now-card-project">${escapeHtml(item.projectSlug)} / ${escapeHtml(item.label)}</span>
-        <span class="now-card-activity" title="${escapeAttribute(item.activity)}">${escapeHtml(item.activity)}</span>
-        <span class="now-card-foot">
-          <span>${escapeHtml(item.meta || "no telemetry metadata")}</span>
-          <span>${escapeHtml(formatTime(item.updatedAt))}</span>
-        </span>
-      </span>
-    </button>
-  `;
-}
-
-function attentionItems() {
-  const items = [];
-  for (const job of state.jobs) {
-    const blockers = job.processed?.blockers || job.summary?.blockers || [];
-    if (job.status === "failed") {
-      items.push(attentionFromEntity("runner-job", job.id, job.projectSlug, job.taskId, "failed", "Runner job failed.", job.updatedAt));
-    } else if (job.isStuck || job.rawTelemetry?.rawStale) {
-      items.push(attentionFromEntity("runner-job", job.id, job.projectSlug, job.taskId, "timed out", "Runner telemetry is stale or marked stuck.", job.updatedAt));
-    } else if (blockers.length) {
-      items.push(attentionFromEntity("runner-job", job.id, job.projectSlug, job.taskId, "blocked", blockers[0]?.message || blockers[0] || "Blocker signal extracted.", job.updatedAt));
-    } else if (job.rawTelemetry?.rawAvailableButUnprocessed || job.processed?.freshness?.processedStale) {
-      items.push(attentionFromEntity("runner-job", job.id, job.projectSlug, job.taskId, "unprocessed", "Raw runner telemetry is ahead of the processed read model.", job.updatedAt));
-    }
-  }
-  for (const thread of state.threads) {
-    const blockers = thread.processed?.blockers || [];
-    if (thread.status === "failed") {
-      items.push(attentionFromEntity("local-thread", thread.id, thread.projectSlug, thread.title || thread.threadId, "failed", "Local thread failed.", thread.updatedAt));
-    } else if (thread.freshness?.rawStale) {
-      items.push(attentionFromEntity("local-thread", thread.id, thread.projectSlug, thread.title || thread.threadId, "stale", "Local telemetry is stale.", thread.updatedAt));
-    } else if (blockers.length) {
-      items.push(attentionFromEntity("local-thread", thread.id, thread.projectSlug, thread.title || thread.threadId, "blocked", blockers[0]?.message || "Blocker signal extracted.", thread.updatedAt));
-    } else if (thread.freshness?.processedStale) {
-      items.push(attentionFromEntity("local-thread", thread.id, thread.projectSlug, thread.title || thread.threadId, "unprocessed", "Local raw telemetry is ahead of processing.", thread.updatedAt));
-    }
-  }
-  return items.sort((left, right) => attentionSeverity(right.status) - attentionSeverity(left.status) || Date.parse(right.updatedAt || "") - Date.parse(left.updatedAt || ""));
-}
-
-function attentionFromEntity(kind, id, projectSlug, title, status, message, updatedAt) {
-  return { kind, id, projectSlug, title, status, message, updatedAt, className: nowStatusClass(status) };
-}
-
-function attentionCard(item) {
-  return `
-    <button class="attention-card status-${escapeAttribute(item.className)}" type="button" data-attention-kind="${escapeAttribute(item.kind)}" data-attention-id="${escapeAttribute(item.id)}">
-      <span class="attention-avatar">${escapeHtml(initials(item.projectSlug))}</span>
-      <span>
-        <strong title="${escapeAttribute(item.title)}">${escapeHtml(item.title)}</strong>
-        <em>${escapeHtml(item.message)}</em>
-      </span>
-      <span class="status ${escapeAttribute(item.className)}">${escapeHtml(formatStatus(item.status))}</span>
-    </button>
-  `;
-}
-
-function usageMini(usage) {
-  const latest = usage.latest || {};
-  const weekly = usage.weekly || latest.weeklyRemaining || {};
-  const rolling = usage.rolling5h || latest.rolling5hRemaining || {};
-  const burn = usage.burn || {};
-  return `
-    <div class="usage-mini">
-      ${usageMeter("Weekly", weekly, weekly.resetAt || latest.reset?.weeklyResetAt)}
-      ${usageMeter("5h window", rolling, rolling.resetAt || latest.reset?.rolling5hResetAt)}
-      <div class="usage-burn">
-        <span>Token burn <em>${escapeHtml(formatUsageMethod(burn.lastHour?.method))}</em></span>
-        <strong>${escapeHtml(formatTokenBurn(burn.lastHour))} last hour</strong>
-        <small>${escapeHtml(`${formatTokenBurn(burn.rolling5h)} over 5h / ${formatTokenBurn(burn.week)} this week`)}</small>
-      </div>
-    </div>
-  `;
-}
-
-function usageMeter(label, value, resetAt) {
-  const percent = typeof value?.percentRemaining === "number" ? Math.max(0, Math.min(100, value.percentRemaining)) : null;
-  return `
-    <div class="usage-meter">
-      <span>${escapeHtml(label)} <em>${escapeHtml(formatResetAndMethod(resetAt, value?.method))}</em></span>
-      <strong>${escapeHtml(percent === null ? formatLimitRemaining(value) : `${Math.round(percent)}%`)}</strong>
-      <i aria-hidden="true"><b style="width:${percent === null ? 0 : percent}%"></b></i>
-    </div>
-  `;
-}
-
-function projectGroups(items) {
-  const groups = new Map();
-  for (const item of items) {
-    const group = groups.get(item.projectSlug) || { slug: item.projectSlug, runner: 0, local: 0 };
-    if (item.kind === "runner-job") {
-      group.runner += 1;
-    } else {
-      group.local += 1;
-    }
-    groups.set(item.projectSlug, group);
-  }
-  return Array.from(groups.values()).slice(0, 8);
-}
-
-function openSurfaceItem(kind, id) {
-  if (kind === "runner-job") {
-    state.view = "jobs";
-    renderViewTabs();
-    loadDetail(id);
-  } else {
-    state.view = "threads";
-    renderViewTabs();
-    loadThreadDetail(id);
-  }
-}
-
-function nowStatement(item) {
-  return `${item.projectSlug} is ${nowVerb(item)}.`;
-}
-
-function nowVerb(item) {
-  if (item.nowStatus === "timed-out") return "timed out";
-  if (item.nowStatus === "ready-to-resume") return "ready to resume";
-  if (item.nowStatus === "completed") return "done";
-  return `${item.nowStatus} ${item.activity}`.trim();
-}
-
-function deriveNowStatus(status, activity, flags = {}) {
-  const text = `${status || ""} ${activity || ""}`.toLowerCase();
-  if (flags.failed || /failed|error|exception/u.test(text)) return "failed";
-  if (flags.stale || /timed out|timeout|stale/u.test(text)) return "timed-out";
-  if (flags.blocked || /blocked|waiting on secret|approval|cannot proceed/u.test(text)) return "blocked";
-  if (/ready to resume|resume/u.test(text)) return "ready-to-resume";
-  if (/edit|patch|writing|modifying/u.test(text)) return "editing";
-  if (/wait|queued|pending/u.test(text)) return "waiting";
-  if (/think|reason|planning/u.test(text)) return "thinking";
-  if (flags.completed || status === "completed") return "completed";
-  if (status === "running" || status === "active") return "running";
-  return status || "unknown";
-}
-
-function nowStatusClass(status) {
-  if (status === "timed-out") return "stuck";
-  if (status === "blocked" || status === "waiting") return "stuck";
-  if (status === "ready-to-resume") return "running";
-  return statusClass(status);
-}
-
-function attentionRank(item) {
-  return attentionSeverity(item.nowStatus) * 10000000000000 + (Date.parse(item.updatedAt || "") || 0);
-}
-
-function attentionSeverity(status) {
-  if (["failed", "timed-out", "blocked", "stale"].includes(status)) return 4;
-  if (["unprocessed", "waiting"].includes(status)) return 3;
-  if (["running", "editing", "thinking", "ready-to-resume"].includes(status)) return 2;
-  return 1;
-}
-
-function initials(value) {
-  return String(value || "AR")
-    .split(/[^a-zA-Z0-9]+/u)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part.charAt(0).toUpperCase())
-    .join("") || "AR";
-}
-
-function terminalStatuses() {
-  return new Set(["completed", "failed", "stopped"]);
-}
-
-function emptyInline(message) {
-  return `<div class="inline-empty">${escapeHtml(message)}</div>`;
-}
-
-function nowSkeleton() {
-  return `
-    <section class="now-hero skeleton-row">
-      <span class="skeleton-line w-30"></span>
-      <span class="skeleton-line w-80"></span>
-      <span class="skeleton-line w-50"></span>
+      <aside class="job-right-rail">
+        <article class="rail-panel glass-panel skeleton-card"></article>
+        <article class="rail-panel glass-panel skeleton-card"></article>
+      </aside>
     </section>
-    <div class="now-card-grid">
-      ${Array.from({ length: 4 }, () => '<div class="now-card skeleton-row"><span class="skeleton-line w-80"></span><span class="skeleton-line w-50"></span></div>').join("")}
-    </div>
   `;
+}
+
+function preferredJob(jobs) {
+  return jobs.find((job) => job.status === "running" && !job.isStuck) ||
+    jobs.find((job) => !terminalStatuses.has(job.status)) ||
+    jobs[0] ||
+    null;
+}
+
+function selectedJob() {
+  if (state.detailJob?.id === state.selectedJobId) {
+    return state.detailJob;
+  }
+  return state.jobs.find((job) => job.id === state.selectedJobId) || preferredJob(state.jobs);
+}
+
+function carouselJobs(selected) {
+  const jobs = state.jobs;
+  const index = Math.max(0, jobs.findIndex((job) => job.id === selected?.id));
+  return {
+    previous: jobs[index - 1] || jobs[index + 2] || null,
+    next: jobs[index + 1] || jobs[index - 2] || null
+  };
+}
+
+function currentProjectSlug() {
+  return selectedJob()?.projectSlug || state.jobs[0]?.projectSlug || state.processedStreams[0]?.projectSlug || "agent-runner";
+}
+
+function displayStatus(job) {
+  if (!job) {
+    return "unavailable";
+  }
+  if (job.isStuck) {
+    return "stuck";
+  }
+  return job.status || "unknown";
+}
+
+function jobTitle(job) {
+  const human = firstString([
+    job?.processed?.metadata?.sourceTitle,
+    job?.sessionName,
+    job?.summary?.title,
+    job?.processed?.metadata?.sourceMetadata?.title
+  ]);
+  if (human && !looksLikeMachineId(human)) {
+    return humanizeIdentifier(human);
+  }
+  const task = firstString([job?.taskId]);
+  if (task && !looksLikeMachineId(task)) {
+    return humanizeIdentifier(task);
+  }
+  const activity = firstString([
+    job?.processed?.latestActivity,
+    job?.summary?.currentActivity,
+    job?.currentActivity
+  ]);
+  if (activity && !looksLikeMachineId(activity)) {
+    return sentenceTitle(activity);
+  }
+  return job?.projectSlug ? `${humanizeIdentifier(job.projectSlug)} job` : "Untitled runner job";
+}
+
+function jobBranch(job) {
+  return firstString([
+    job?.telemetry?.git?.branch,
+    job?.summary?.branch,
+    job?.statusJson?.branch,
+    job?.processed?.metadata?.sourceMetadata?.branch,
+    job?.projectSlug
+  ]) || "Branch unavailable";
+}
+
+function jobIconClass(job) {
+  const text = `${jobTitle(job)} ${job?.projectSlug || ""}`.toLowerCase();
+  if (text.includes("doc")) return "book";
+  if (text.includes("test")) return "file";
+  return "cube";
 }
 
 function normalizedTelemetry(job) {
-  const telemetry = job.telemetry && typeof job.telemetry === "object" ? job.telemetry : null;
+  const telemetry = job?.telemetry && typeof job.telemetry === "object" ? job.telemetry : null;
   if (!telemetry) {
     return null;
   }
@@ -1692,415 +1128,532 @@ function normalizedTelemetry(job) {
     files: Array.isArray(telemetry.files) ? telemetry.files : [],
     goals: Array.isArray(telemetry.goals) ? telemetry.goals : [],
     subgoals: Array.isArray(telemetry.subgoals) ? telemetry.subgoals : [],
-    spend: telemetry.spend || job.summary?.cost || null
+    spend: telemetry.spend || job?.summary?.cost || null
   };
 }
 
-function aggregateFilesFromEvents(events) {
-  const files = new Map();
-  for (const event of events) {
-    if (!event.filePath) {
-      continue;
+function jobGoals(job) {
+  const telemetry = normalizedTelemetry(job);
+  const candidates = [
+    telemetry?.goals,
+    job?.summary?.goals,
+    job?.statusJson?.goals,
+    job?.processed?.metadata?.goals
+  ];
+  for (const candidate of candidates) {
+    const goals = normalizeGoals(candidate);
+    if (goals.length) {
+      return goals;
     }
-    const action = fileActionForEvent(event.type);
-    if (!action) {
-      continue;
-    }
-    const existing = files.get(event.filePath) || {
-      path: event.filePath,
-      latestAction: action,
-      readCount: 0,
-      editCount: 0,
-      createCount: 0,
-      deleteCount: 0,
-      patchCount: 0,
-      lastSeenAt: null,
-      confidence: event.confidence || "low",
-      source: event.source || "events"
-    };
-    existing.latestAction = action;
-    existing.lastSeenAt = event.timestamp || existing.lastSeenAt;
-    if (action === "read") {
-      existing.readCount += 1;
-    } else if (action === "edited") {
-      existing.editCount += 1;
-    } else if (action === "created") {
-      existing.createCount += 1;
-    } else if (action === "deleted") {
-      existing.deleteCount += 1;
-    } else if (action === "patched") {
-      existing.patchCount += 1;
-    }
-    files.set(event.filePath, existing);
   }
-  return Array.from(files.values());
+  return [];
 }
 
-function fileActionForEvent(type) {
-  if (type === "file_read") return "read";
-  if (type === "file_edited") return "edited";
-  if (type === "file_created") return "created";
-  if (type === "file_deleted") return "deleted";
-  if (type === "patch_applied") return "patched";
+function jobSubgoals(job) {
+  const telemetry = normalizedTelemetry(job);
+  const candidates = [
+    telemetry?.subgoals,
+    job?.summary?.subgoals,
+    job?.statusJson?.subgoals,
+    job?.processed?.metadata?.subgoals
+  ];
+  for (const candidate of candidates) {
+    const goals = normalizeGoals(candidate);
+    if (goals.length) {
+      return goals;
+    }
+  }
+  return [];
+}
+
+function normalizeGoals(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((goal, index) => {
+      if (typeof goal === "string") {
+        return {
+          id: `goal-${index}`,
+          label: goal,
+          state: "unknown",
+          percent: null,
+          parentId: null
+        };
+      }
+      if (!goal || typeof goal !== "object") {
+        return null;
+      }
+      const state = normalizeGoalState(goal.state || goal.status || goal.phase);
+      const percent = numberOrNull(goal.percent ?? goal.progressPercent ?? goal.progress?.percent);
+      return {
+        id: String(goal.id || goal.key || `goal-${index}`),
+        label: firstString([goal.label, goal.title, goal.name, goal.description]) || `Goal ${index + 1}`,
+        state,
+        percent: percent ?? (state === "complete" ? 100 : null),
+        parentId: goal.parentId || goal.parent_id || null
+      };
+    })
+    .filter(Boolean);
+}
+
+function normalizeGoalState(value) {
+  const state = String(value || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  if (["complete", "completed", "done", "passed"].includes(state)) return "complete";
+  if (["active", "in_progress", "running", "current"].includes(state)) return "active";
+  if (["blocked", "failed"].includes(state)) return "blocked";
+  if (["pending", "queued", "not_started", "todo"].includes(state)) return "pending";
+  return state || "unknown";
+}
+
+function goalState(goal) {
+  return normalizeGoalState(goal?.state);
+}
+
+function currentGoal(job) {
+  const goals = jobGoals(job);
+  const active = goals.find((goal) => goalState(goal) === "active") ||
+    goals.find((goal) => !["complete"].includes(goalState(goal))) ||
+    goals[0];
+  if (active) {
+    return active;
+  }
+  return {
+    label: "Contract goals unavailable",
+    state: "unknown",
+    percent: null,
+    unavailable: true
+  };
+}
+
+function currentSubgoal(job) {
+  const subgoals = jobSubgoals(job);
+  const active = subgoals.find((goal) => goalState(goal) === "active") ||
+    subgoals.find((goal) => !["complete"].includes(goalState(goal)));
+  if (active) {
+    return active;
+  }
+  const goal = currentGoal(job);
+  if (!goal.unavailable) {
+    return goal;
+  }
+  return {
+    label: latestActivity(job) || "No current subgoal reported",
+    state: "unknown",
+    percent: null,
+    unavailable: true
+  };
+}
+
+function completionPercent(job) {
+  const telemetry = normalizedTelemetry(job);
+  const direct = numberOrNull(telemetry?.progress?.percent ?? job?.summary?.progressPercent ?? job?.progressPercent);
+  if (direct !== null) {
+    return clamp(direct, 0, 100);
+  }
+  const goals = jobGoals(job);
+  if (goals.length) {
+    const complete = goals.filter((goal) => goalState(goal) === "complete").length;
+    return Math.round((complete / goals.length) * 100);
+  }
+  if (job?.status === "completed") {
+    return 100;
+  }
   return null;
 }
 
-function unseenEventIds(jobId, events) {
-  const seen = state.seenEvents.get(jobId) || new Set();
-  return new Set(events.map((event) => event.id).filter((id) => id && !seen.has(id)));
+function remainingGoals(job) {
+  const goals = jobGoals(job);
+  if (!goals.length) {
+    return null;
+  }
+  return goals.filter((goal) => goalState(goal) !== "complete").length;
 }
 
-function markEventsSeen(jobId, events) {
-  const seen = state.seenEvents.get(jobId) || new Set();
-  for (const event of events) {
-    if (event.id) {
-      seen.add(event.id);
-    }
-  }
-  state.seenEvents.set(jobId, seen);
+function latestActivity(job) {
+  const telemetry = normalizedTelemetry(job);
+  return firstString([
+    job?.processed?.latestActivity,
+    telemetry?.currentActivity,
+    job?.summary?.currentActivity,
+    job?.currentActivity,
+    job?.processed?.summary
+  ]);
 }
 
-function formatCost(cost) {
-  return formatUsd(cost?.totalOperationalCostUsd ?? cost?.totalEstimatedCostUsd);
+function jobFiles(job) {
+  const telemetry = normalizedTelemetry(job);
+  const files = [];
+  if (Array.isArray(telemetry?.files)) {
+    files.push(...telemetry.files);
+  }
+  if (Array.isArray(job?.processed?.files)) {
+    files.push(...job.processed.files);
+  }
+  return files
+    .map((file) => typeof file === "string" ? { path: file } : file)
+    .filter((file) => file?.path)
+    .slice(0, 6);
 }
 
-function formatSourceKind(value) {
-  if (value === "codex-cli-thread") return "CLI thread";
-  if (value === "codex-ide-thread") return "IDE thread";
-  if (value === "local-workspace") return "Workspace telemetry";
-  if (value === "codespace-worker") return "Codespace worker";
-  if (value === "runner-job") return "Runner job";
-  return formatStatus(value || "local thread");
+function jobCost(job) {
+  const telemetry = normalizedTelemetry(job);
+  return job?.processed?.cost || telemetry?.spend || job?.summary?.cost || null;
 }
 
-function formatRawLine(raw) {
-  if (!raw) {
-    return "";
+function workStream(job) {
+  const telemetry = normalizedTelemetry(job);
+  const rawEvents = Array.isArray(telemetry?.events) ? telemetry.events.slice(-5) : [];
+  if (rawEvents.length >= 3) {
+    return {
+      semantic: true,
+      events: rawEvents.map((event) => ({
+        title: event.label || formatStatus(event.type || "Activity"),
+        body: event.detail || event.command?.text || event.filePath || "Structured event observed.",
+        time: formatClock(event.timestamp || job?.updatedAt),
+        source: "Live",
+        icon: iconForEvent(event.type),
+        tone: event.severity || "info",
+        artifact: event.filePath || "",
+        command: event.command?.text || "",
+        chip: formatStatus(event.type || "event")
+      }))
+    };
   }
-  const count = raw.rawChunkCount;
-  const parts = [
-    typeof count === "number" ? `${count} raw` : "",
-    raw.latestRawTelemetryAt ? formatTime(raw.latestRawTelemetryAt) : "",
-    raw.rawStale ? "stale" : ""
-  ].filter(Boolean);
-  return parts.join(" / ");
+
+  const processed = job?.processed || {};
+  const files = jobFiles(job);
+  const command = latestCommand(processed);
+  const current = currentSubgoal(job);
+  const activity = latestActivity(job);
+  const events = [];
+  if (activity) {
+    events.push({
+      title: "Status update",
+      body: activity,
+      time: formatClock(job?.updatedAt || job?.lastSeenAt),
+      source: processed.processedAt ? "Job telemetry" : "Job status",
+      icon: "search",
+      tone: "info",
+      chip: processed.processedAt ? "Processed" : "Reported"
+    });
+  } else {
+    events.push({
+      title: "Status update",
+      body: "No activity text has been reported for this job yet.",
+      time: "Pending",
+      source: "Unavailable",
+      icon: "search",
+      tone: "warning",
+      chip: "Unavailable"
+    });
+  }
+  events.push({
+    title: files[0] ? "File or artifact observed" : "File context unavailable",
+    body: files[0] ? "A referenced file is available from processed telemetry." : "No file or artifact chip is available for this job.",
+    time: formatClock(processed.processedAt || job?.updatedAt),
+    source: files[0] ? "Job telemetry" : "Skeleton",
+    icon: "file",
+    tone: files[0] ? "info" : "warning",
+    artifact: files[0]?.path || "",
+    chip: files[0] ? "Artifact" : "Unavailable"
+  });
+  events.push({
+    title: command ? "Command/test signal" : "Command signal unavailable",
+    body: command ? command.label || command.command || "Command activity was observed." : "No command or test chip has been extracted yet.",
+    time: formatClock(command?.timestamp || processed.processedAt || job?.updatedAt),
+    source: command ? "Job telemetry" : "Skeleton",
+    icon: "code",
+    tone: command?.failed ? "error" : command ? "success" : "warning",
+    command: command?.command || "",
+    chip: command ? (command.failed ? "Failed" : "Observed") : "Unavailable"
+  });
+  events.push({
+    title: "Goal update",
+    body: current.label,
+    time: formatClock(processed.processedAt || job?.updatedAt),
+    source: current.unavailable ? "Skeleton" : "Goal telemetry",
+    icon: "target",
+    tone: current.unavailable ? "warning" : "info",
+    chip: current.unavailable ? "Unavailable" : formatStatus(current.state)
+  });
+  events.push({
+    title: "Next action",
+    body: processed.nextAction || "Next action has not been reported yet.",
+    time: formatClock(processed.processedAt || job?.updatedAt),
+    source: processed.nextAction ? "Processed stream" : "Skeleton",
+    icon: "cube",
+    tone: processed.nextAction ? "info" : "warning",
+    chip: processed.nextAction ? "Next" : "Pending"
+  });
+  return { semantic: false, events };
 }
 
-function formatBytes(value) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return "unknown";
+function latestCommand(processed) {
+  const metadata = processed?.metadata || {};
+  const commands = Array.isArray(metadata.commandActivity) ? metadata.commandActivity : [];
+  const tools = Array.isArray(metadata.toolActivity) ? metadata.toolActivity : [];
+  return commands.at(-1) || tools.at(-1) || null;
+}
+
+function iconForEvent(type) {
+  if (String(type || "").includes("file")) return "file";
+  if (String(type || "").includes("command")) return "code";
+  if (String(type || "").includes("goal")) return "target";
+  return "search";
+}
+
+function healthForJob(job) {
+  if (!job) return "unavailable";
+  if (job.status === "failed" || job.isStuck) return "error";
+  if (job.rawTelemetry?.rawStale || job.processed?.freshness?.processedStale) return "warning";
+  if (job.status === "running" || job.status === "completed") return "healthy";
+  return job.status || "unknown";
+}
+
+function elapsedText(job) {
+  if (!job?.startedAt) {
+    return "Unavailable";
   }
-  if (value < 1024) {
-    return `${value} B`;
+  const start = Date.parse(job.startedAt);
+  const end = Date.parse(job.finishedAt || "") || Date.now();
+  if (!Number.isFinite(start)) {
+    return "Unavailable";
   }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KB`;
+  return formatDuration(Math.max(0, end - start));
+}
+
+function etaText(job, options = {}) {
+  const min = numberOrNull(job?.etaMinutesMin ?? job?.summary?.etaMinutesMin);
+  const max = numberOrNull(job?.etaMinutesMax ?? job?.summary?.etaMinutesMax);
+  if (min === null && max === null) {
+    return options.short ? "No ETA" : "No ETA";
   }
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  if (min !== null && max !== null && min !== max) {
+    return `${formatMinuteNumber(min)}-${formatMinuteNumber(max)}m`;
+  }
+  return `${formatMinuteNumber(min ?? max)}m`;
+}
+
+function formatMinuteNumber(value) {
+  return Number(value).toFixed(value < 10 && value % 1 ? 1 : 0);
+}
+
+function formatDuration(ms) {
+  const minutes = Math.max(0, Math.round(ms / 60000));
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (hours < 24) {
+    return rest ? `${hours}h ${rest}m` : `${hours}h`;
+  }
+  const days = Math.floor(hours / 24);
+  const dayHours = hours % 24;
+  return dayHours ? `${days}d ${dayHours}h` : `${days}d`;
+}
+
+function formatClock(value) {
+  if (!value) {
+    return "Pending";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "Pending";
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function formatRelative(value) {
+  if (!value) {
+    return "No data";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "No data";
+  }
+  const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+function freshnessText() {
+  if (!state.lastUpdatedAt) {
+    return "Never updated";
+  }
+  return "Updated " + formatClock(state.lastUpdatedAt.toISOString());
+}
+
+function formatTokenRate(job, cost) {
+  const tokens = numberOrNull(cost?.totalTokens ?? job?.processed?.tokenUsage?.totalTokens);
+  if (tokens === null || !job?.startedAt) {
+    return "No data";
+  }
+  const start = Date.parse(job.startedAt);
+  const end = Date.parse(job.finishedAt || "") || Date.now();
+  const minutes = Math.max(1, (end - start) / 60000);
+  return `${formatCompactNumber(tokens / minutes)}/min`;
+}
+
+function formatTokenBurn(value) {
+  const tokens = numberOrNull(value?.tokens);
+  return tokens === null ? "No data" : formatCompactNumber(tokens);
+}
+
+function formatLimitTokens(value) {
+  if (!value || typeof value !== "object") {
+    return "No data yet";
+  }
+  const used = numberOrNull(value.usedTokens);
+  const limit = numberOrNull(value.limitTokens);
+  if (used !== null && limit !== null) {
+    return `${formatCompactNumber(used)} / ${formatCompactNumber(limit)} tokens`;
+  }
+  if (limit !== null) {
+    return `${formatCompactNumber(limit)} token limit`;
+  }
+  return "Limit unavailable";
 }
 
 function formatUsd(value) {
-  return typeof value === "number" && Number.isFinite(value) ? "$" + value.toFixed(value < 0.01 ? 4 : 2) : "unknown";
-}
-
-function formatTokens(cost) {
-  const tokens = cost?.totalTokens;
-  return typeof tokens === "number" && Number.isFinite(tokens) ? new Intl.NumberFormat().format(tokens) : "unknown";
-}
-
-function formatMinutes(value) {
-  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(value < 10 ? 1 : 0) + " min" : "unknown";
-}
-
-function formatSeatLine(spend) {
-  const seats = spend.codexSubscriptionSeatMultiplier || 1;
-  const monthly = spend.codexSubscriptionMonthlyUsd;
-  const method = formatUsageMethod(spend.codexSubscriptionPriceMethod);
-  return monthly ? `${formatUsd(monthly)} monthly x ${seats} / ${method}` : "subscription default unavailable";
-}
-
-function formatAllocationShare(spend) {
-  const percent = spend.codexTaskAllocationPercent;
-  const method = formatUsageMethod(spend.codexCostMethod || spend.codexAllocationMethod || spend.tokenUsageMethod);
-  const source = spend.codexCostSource ? ` / ${formatStatus(spend.codexCostSource)}` : "";
-  return typeof percent === "number" ? `${percent.toFixed(percent < 1 ? 2 : 1)}% weekly / ${method}${source}` : `${method}${source}`;
-}
-
-function formatRemaining(spend) {
-  return spend.codexRemainingWeeklyBudgetUsd == null ? "weekly remaining unknown" : `${formatUsd(spend.codexRemainingWeeklyBudgetUsd)} weekly remaining`;
-}
-
-function formatSpendSource(spend) {
-  if (!spend || typeof spend !== "object") {
-    return "missing spend";
+  const numeric = numberOrNull(value);
+  if (numeric === null) {
+    return "No data";
   }
-  return formatUsageMethod(spend.codexCostMethod || spend.codexAllocationMethod || spend.tokenUsageMethod);
+  return "$" + numeric.toFixed(numeric < 0.01 ? 4 : 2);
 }
 
-function progressPercent(job) {
-  const telemetry = normalizedTelemetry(job);
-  const value = telemetry?.progress?.percent ?? job.summary?.progressPercent ?? job.progressPercent;
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return job.status === "completed" ? 100 : 0;
+function formatBytes(value) {
+  const numeric = numberOrNull(value);
+  if (numeric === null) {
+    return "No data";
   }
-  return Math.max(0, Math.min(100, value));
+  if (numeric < 1024) return `${numeric} B`;
+  if (numeric < 1024 * 1024) return `${(numeric / 1024).toFixed(1)} KB`;
+  if (numeric < 1024 * 1024 * 1024) return `${(numeric / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(numeric / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
-function percentDisplay(job) {
-  const telemetry = normalizedTelemetry(job);
-  const value = telemetry?.progress?.percent ?? job.summary?.progressPercent ?? job.progressPercent;
-  return typeof value === "number" && Number.isFinite(value) ? formatPercent(value) : "unknown";
-}
-
-function progressSourceLabel(job) {
-  const processed = job.processed?.deterministicVersion ? "deterministic" : "";
-  const telemetry = normalizedTelemetry(job);
-  if (telemetry?.progress?.source) {
-    return telemetry.progress.source;
+function formatCompactNumber(value) {
+  const numeric = numberOrNull(value);
+  if (numeric === null) {
+    return "No data";
   }
-  if (processed) {
-    return processed;
-  }
-  return job.status === "completed" ? "complete" : "reported";
+  return new Intl.NumberFormat(undefined, {
+    notation: numeric >= 10000 ? "compact" : "standard",
+    maximumFractionDigits: numeric >= 10000 ? 1 : 0
+  }).format(numeric);
 }
 
 function formatPercent(value) {
   return `${Math.round(value)}%`;
 }
 
-function formatEta(summary) {
-  const min = summary?.etaMinutesMin;
-  const max = summary?.etaMinutesMax;
-  if (typeof min !== "number" && typeof max !== "number") {
-    return "unknown";
-  }
-  if (min === max || typeof max !== "number") {
-    return `${min} min`;
-  }
-  if (typeof min !== "number") {
-    return `${max} min`;
-  }
-  return `${min}-${max} min`;
-}
-
-function formatTime(value) {
-  if (!value) {
-    return "n/a";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(date);
-}
-
-function formatRefreshTime(date) {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit"
-  }).format(date);
-}
-
 function formatStatus(value) {
-  const words = String(value || "unknown").replaceAll("-", " ");
+  const words = String(value || "unknown").replace(/[_-]+/g, " ");
   return words.charAt(0).toUpperCase() + words.slice(1);
-}
-
-function statusClass(value) {
-  const normalized = String(value || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  return normalized || "unknown";
-}
-
-function detailSubline(job) {
-  const parts = [
-    job.sessionName ? `Session ${job.sessionName}` : "",
-    job.remoteHost || "",
-    job.updatedAt ? `Updated ${formatTime(job.updatedAt)}` : ""
-  ].filter(Boolean);
-  return parts.join(" / ") || "No session metadata";
-}
-
-function threadSubline(thread) {
-  const parts = [
-    thread.threadId ? `Thread ${thread.threadId}` : "",
-    thread.latestRawTelemetryAt ? `Raw ${formatTime(thread.latestRawTelemetryAt)}` : "",
-    thread.linkedRunnerJobId ? `Linked ${thread.linkedRunnerJobId}` : ""
-  ].filter(Boolean);
-  return parts.join(" / ") || "No local thread metadata";
-}
-
-function activityFeedEvent(item) {
-  return {
-    id: item.id,
-    type: "status_changed",
-    label: item.label || "Activity",
-    detail: `${item.title || item.id}: ${item.processedSummary || item.activity || "No activity reported"}`,
-    severity: item.rawChunkCount ? "info" : "warning",
-    status: item.status,
-    confidence: item.processedAt ? "observed" : "medium",
-    source: item.type,
-    timestamp: item.updatedAt
-  };
-}
-
-function blockerEvent(blocker) {
-  return {
-    id: `${blocker.kind || "blocker"}:${blocker.observedAt || ""}:${blocker.message || ""}`,
-    type: "error",
-    label: formatStatus(blocker.kind || "Blocker"),
-    detail: blocker.message || "Blocker signal extracted.",
-    severity: "warning",
-    confidence: "observed",
-    source: blocker.source || "deterministic",
-    timestamp: blocker.observedAt
-  };
-}
-
-function warningEvent(warning) {
-  return {
-    id: warning.kind || warning.message,
-    type: "status_changed",
-    label: formatStatus(warning.kind || "Warning"),
-    detail: warning.message || "",
-    severity: warning.severity || "warning",
-    confidence: "observed",
-    source: "processor",
-    timestamp: new Date().toISOString()
-  };
-}
-
-function memoryEvidenceEvent(evidence) {
-  return {
-    id: `${evidence.sourceStreamId || ""}:${evidence.chunkId || ""}:${evidence.sequence || ""}`,
-    type: "status_changed",
-    label: evidence.sourceStreamId || "Evidence",
-    detail: evidence.chunkId ? `Chunk ${evidence.chunkId}` : `Sequence ${evidence.sequence || "unknown"}`,
-    severity: "info",
-    confidence: evidence.evidenceStrength || "observed",
-    source: "memory",
-    timestamp: evidence.timestamp
-  };
-}
-
-function formatGoalMeta(goal) {
-  return [formatStatus(goal.state), goal.source || ""].filter(Boolean).join(" / ");
-}
-
-function formatEvidenceLabel(value) {
-  if (["observed", "calculated", "extracted", "estimated"].includes(value)) {
-    return value;
-  }
-  return `${value || "low"} signal`;
-}
-
-function formatProcessedLine(processed) {
-  if (!processed?.processedAt) {
-    return "";
-  }
-  const parts = [
-    `processed ${formatTime(processed.processedAt)}`,
-    processed.freshness?.processedStale ? "behind" : "",
-    processed.modelVersion ? "model" : "deterministic"
-  ].filter(Boolean);
-  return parts.join(" / ");
-}
-
-function formatLimitRemaining(value) {
-  if (!value || typeof value !== "object") {
-    return "unknown";
-  }
-  const percent = value.percentRemaining;
-  if (typeof percent === "number" && Number.isFinite(percent)) {
-    return `${percent.toFixed(percent < 10 ? 1 : 0)}%`;
-  }
-  const remaining = value.remainingTokens ?? value.remaining;
-  return typeof remaining === "number" ? formatNumber(remaining) : "unknown";
-}
-
-function formatLimitUsed(value) {
-  if (!value || typeof value !== "object") {
-    return "unknown";
-  }
-  const percent = value.usedPercent;
-  if (typeof percent === "number" && Number.isFinite(percent)) {
-    return `${percent.toFixed(percent < 10 ? 1 : 0)}%`;
-  }
-  const used = value.usedTokens ?? value.used;
-  return typeof used === "number" ? formatNumber(used) : "unknown";
-}
-
-function formatLimitTokens(value) {
-  if (!value || typeof value !== "object") {
-    return "limit unknown";
-  }
-  const used = value.usedTokens;
-  const limit = value.limitTokens;
-  if (typeof used === "number" && typeof limit === "number") {
-    return `${formatNumber(used)} used of ${formatNumber(limit)}`;
-  }
-  if (typeof limit === "number") {
-    return `${formatNumber(limit)} limit`;
-  }
-  return "limit unknown";
-}
-
-function formatReset(value) {
-  return value ? `resets ${formatTime(value)}` : "reset unknown";
-}
-
-function formatResetAndMethod(resetAt, method) {
-  return `${formatReset(resetAt)} / ${formatUsageMethod(method)}`;
-}
-
-function formatLimitEta(value) {
-  return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(value < 10 ? 1 : 0)}h until limit` : "limit ETA unknown";
-}
-
-function formatTokenBurn(value) {
-  const tokens = value?.tokens;
-  return typeof tokens === "number" && Number.isFinite(tokens) ? formatNumber(tokens) : "unknown";
-}
-
-function formatBurnRate(value) {
-  const rate = value?.tokensPerHour;
-  const method = formatUsageMethod(value?.method);
-  return typeof rate === "number" && Number.isFinite(rate) ? `${formatNumber(rate)} tokens/hour / ${method}` : `rate unknown / ${method}`;
 }
 
 function formatUsageMethod(value) {
   return ["measured", "allocated", "estimated", "unknown"].includes(value) ? value : "unknown";
 }
 
-function formatNumber(value) {
-  return typeof value === "number" && Number.isFinite(value) ? new Intl.NumberFormat().format(Math.round(value)) : "unknown";
+function formatMethodLabel(value) {
+  if (!value || value === "unavailable") {
+    return "Unavailable";
+  }
+  if (value.includes("estimate")) {
+    return "Estimated";
+  }
+  if (value.includes("derived")) {
+    return "Derived";
+  }
+  if (value.includes("measured")) {
+    return "Measured";
+  }
+  return formatStatus(value);
 }
 
-function currentProjectSlug() {
-  return state.jobs[0]?.projectSlug || state.threads[0]?.projectSlug || state.processedStreams[0]?.projectSlug || state.memories[0]?.projectSlug || "";
+function humanizeIdentifier(value) {
+  const text = String(value || "")
+    .replace(/^runner-job:/, "")
+    .split(":")
+    .at(-1)
+    .replace(/\.[a-z0-9]+$/i, "")
+    .replace(/[_-]+/g, " ")
+    .trim();
+  if (!text) {
+    return "Selected job";
+  }
+  return text.replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function formatEventType(value) {
-  return formatStatus(String(value || "tool_call").replaceAll("_", " "));
+function sentenceTitle(value) {
+  const text = String(value || "").trim().replace(/\s+/g, " ");
+  if (!text) {
+    return "Untitled runner job";
+  }
+  const clipped = text.length > 72 ? text.slice(0, 69).trimEnd() + "..." : text;
+  return clipped.charAt(0).toUpperCase() + clipped.slice(1);
 }
 
-function formatFileAction(value) {
-  return formatStatus(value || "read");
+function looksLikeMachineId(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return true;
+  }
+  const compact = text.replace(/[^a-z0-9]/gi, "");
+  if (/^\d{8,}t?\d*/i.test(compact)) {
+    return true;
+  }
+  if (/^[a-f0-9]{12,}$/i.test(compact)) {
+    return true;
+  }
+  if (/^[a-z0-9_-]{18,}$/i.test(text) && !/[aeiou]{2,}/i.test(text)) {
+    return true;
+  }
+  return false;
 }
 
-function formatFileCounts(file) {
-  return [
-    file.readCount ? `r ${file.readCount}` : "",
-    file.editCount ? `e ${file.editCount}` : "",
-    file.createCount ? `c ${file.createCount}` : "",
-    file.deleteCount ? `d ${file.deleteCount}` : "",
-    file.patchCount ? `p ${file.patchCount}` : ""
-  ].filter(Boolean).join(" / ") || "0";
+function shortId(value) {
+  return String(value || "Unavailable").slice(0, 10);
+}
+
+function statusClass(value) {
+  const normalized = String(value || "unavailable").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  if (["active", "running", "healthy", "complete", "completed"].includes(normalized)) return normalized === "completed" ? "complete" : normalized;
+  if (["queued", "waiting", "warning", "stuck", "pending"].includes(normalized)) return normalized;
+  if (["failed", "error", "stopped"].includes(normalized)) return "error";
+  return normalized || "unavailable";
+}
+
+function firstString(values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return "";
+}
+
+function numberOrNull(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }
 
 function escapeHtml(value) {

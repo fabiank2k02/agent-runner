@@ -16,20 +16,20 @@ export async function onRequestGet({ request, env }) {
   }
 
   const url = new URL(request.url);
-  const limit = Math.max(1, Math.min(200, Number.parseInt(url.searchParams.get("limit") || "100", 10)));
+  const requestedLimit = Number.parseInt(url.searchParams.get("limit") || "20", 10);
+  const limit = Math.max(1, Math.min(50, Number.isFinite(requestedLimit) ? requestedLimit : 20));
   const result = await env.DB.prepare(
     `SELECT jobs.id, jobs.project_slug, jobs.task_id, jobs.session_name, jobs.observer_session_name, jobs.remote_host,
       jobs.status, jobs.exit_code, jobs.started_at, jobs.finished_at, jobs.updated_at, jobs.last_seen_at,
       jobs.current_activity, jobs.is_stuck, jobs.progress_percent, jobs.progress_confidence,
-      jobs.eta_minutes_min, jobs.eta_minutes_max, jobs.eta_confidence, jobs.summary_json, jobs.status_json, jobs.telemetry_json, jobs.log_file,
+      jobs.eta_minutes_min, jobs.eta_minutes_max, jobs.eta_confidence, jobs.summary_json, jobs.status_json, jobs.log_file,
       jobs.last_raw_telemetry_at, jobs.raw_chunk_count, jobs.raw_payload_available, jobs.raw_status,
       ps.status AS processed_status, ps.summary AS processed_summary, ps.latest_activity AS processed_latest_activity,
-      ps.next_action AS processed_next_action, ps.blocker_json AS processed_blocker_json,
-      ps.files_json AS processed_files_json, ps.token_usage_json AS processed_token_usage_json,
-      ps.cost_json AS processed_cost_json, ps.linked_streams_json AS processed_linked_streams_json,
+      ps.next_action AS processed_next_action, ps.token_usage_json AS processed_token_usage_json,
+      ps.cost_json AS processed_cost_json,
       ps.deterministic_version AS deterministic_version, ps.model_version AS model_version,
       ps.processed_through_sequence AS processed_through_sequence, ps.processed_at AS processed_at,
-      ps.metadata_json AS processed_metadata_json
+      NULL AS processed_metadata_json
      FROM jobs
      LEFT JOIN processed_streams ps ON ps.id = 'runner-job:' || jobs.project_slug || ':' || jobs.task_id
      ORDER BY updated_at DESC
@@ -142,6 +142,9 @@ function isProcessedStale(status, rawAt, processedAt) {
 }
 
 function parseJson(value, fallback) {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
   try {
     return JSON.parse(value);
   } catch {

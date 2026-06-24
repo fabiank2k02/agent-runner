@@ -169,12 +169,13 @@ describe("dashboard account usage helpers", () => {
     expect(cost.codexTokens).toBe(2500);
   });
 
-  it("renders usage setup and method language without cost confidence labels", () => {
+  it("renders usage instrument language without cost confidence labels", () => {
     const app = fs.readFileSync("dashboard/public/app.js", "utf8");
 
-    expect(app).toContain("No Codex rate-limit or status snapshot has arrived yet");
-    expect(app).toContain("Weekly Used");
-    expect(app).toContain("Burn 5h / Week");
+    expect(app).toContain("Codex allowance");
+    expect(app).toContain("Token pulse");
+    expect(app).toContain("Selected job cost");
+    expect(app).toContain("No data yet");
     expect(app).not.toContain("codexAllocationConfidence");
   });
 });

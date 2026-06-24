@@ -270,6 +270,27 @@ export async function processorStatus({ env, projectSlug, now = new Date() }) {
   const pendingStreams = streamRows.filter((row) => Number(row.latest_sequence || 0) > Number(row.processed_sequence || 0));
   const latestRawSequence = streamRows.reduce((max, row) => Math.max(max, Number(row.latest_sequence || 0)), 0);
   const latestProcessedSequence = streamRows.reduce((max, row) => Math.max(max, Number(row.processed_sequence || 0)), 0);
+  const runObject = run ? rowToObject(run) : null;
+  const mappedRun = runObject ? mapRun(runObject) : null;
+  const mappedLease = lease
+    ? {
+        id: lease.id,
+        ownerId: lease.owner_id,
+        acquiredAt: lease.acquired_at,
+        expiresAt: lease.expires_at,
+        heartbeatAt: lease.heartbeat_at,
+        expired: Date.parse(lease.expires_at) <= now.getTime(),
+        metadata: parseJson(lease.metadata_json, {})
+      }
+    : null;
+  const warnings = budgetWarnings({ usage, lastRun: runObject });
+  const cloudSummary = await projectCloudSummary(env.DB, cleanProjectSlug, now);
+  const leaseStatus = mappedLease ? (mappedLease.expired ? "expired" : "active") : "none";
+  const health = warnings.some((warning) => warning.severity === "error")
+    ? "error"
+    : warnings.length || pendingStreams.length
+      ? "warning"
+      : "healthy";
 
   return {
     projectSlug: cleanProjectSlug,
@@ -278,17 +299,7 @@ export async function processorStatus({ env, projectSlug, now = new Date() }) {
       mode: "wake_on_ingest_or_local_loop",
       paused: false
     },
-    lease: lease
-      ? {
-          id: lease.id,
-          ownerId: lease.owner_id,
-          acquiredAt: lease.acquired_at,
-          expiresAt: lease.expires_at,
-          heartbeatAt: lease.heartbeat_at,
-          expired: Date.parse(lease.expires_at) <= now.getTime(),
-          metadata: parseJson(lease.metadata_json, {})
-        }
-      : null,
+    lease: mappedLease,
     cursor: {
       streamCount: streamRows.length,
       pendingStreamCount: pendingStreams.length,
@@ -305,14 +316,25 @@ export async function processorStatus({ env, projectSlug, now = new Date() }) {
         processedAt: row.processed_at
       }))
     },
-    lastRun: run ? mapRun(rowToObject(run)) : null,
+    runtime: {
+      mode: "distributed",
+      selectedProcessorInstance: mappedLease?.ownerId || mappedRun?.ownerId || null,
+      leaseStatus,
+      health,
+      pendingStreams: pendingStreams.length,
+      behindBySequence: Math.max(0, latestRawSequence - latestProcessedSequence),
+      lastRunAt: mappedRun?.finishedAt || mappedRun?.startedAt || null,
+      lastRunStatus: mappedRun?.status || null
+    },
+    lastRun: mappedRun,
     model: {
       enabled: false,
       mode: "deterministic-only",
       reason: "model_processing_not_configured"
     },
+    cloudSummary,
     accountUsage: usage,
-    warnings: budgetWarnings({ usage, lastRun: run ? rowToObject(run) : null }),
+    warnings,
     deterministicVersion: deterministicProcessorVersion
   };
 }
@@ -1210,6 +1232,103 @@ async function latestAccountUsage(db, projectSlug, env = {}) {
     .bind(projectSlug)
     .all();
   return aggregateAccountUsageRows(rows.results || [], { env });
+}
+
+async function projectCloudSummary(db, projectSlug, now = new Date()) {
+  const startOfDay = new Date(now);
+  startOfDay.setUTCHours(0, 0, 0, 0);
+  const storage = await db
+    .prepare(
+      `SELECT
+        COUNT(*) AS chunk_count,
+        COALESCE(SUM(byte_size), 0) AS byte_size,
+        COALESCE(SUM(CASE WHEN r2_key IS NOT NULL AND r2_key != '' THEN byte_size ELSE 0 END), 0) AS r2_byte_size,
+        COALESCE(SUM(CASE WHEN r2_key IS NOT NULL AND r2_key != '' THEN 1 ELSE 0 END), 0) AS r2_object_count
+       FROM telemetry_chunks
+       WHERE project_slug = ?`
+    )
+    .bind(projectSlug)
+    .first();
+  const running = await db
+    .prepare(
+      `SELECT remote_host, COUNT(*) AS count
+       FROM jobs
+       WHERE project_slug = ? AND status = 'running'
+       GROUP BY remote_host
+       ORDER BY count DESC
+       LIMIT 20`
+    )
+    .bind(projectSlug)
+    .all();
+  const costs = await db
+    .prepare(
+      `SELECT cost_json, processed_at
+       FROM processed_streams
+       WHERE project_slug = ? AND processed_at >= ?
+       ORDER BY processed_at DESC
+       LIMIT 200`
+    )
+    .bind(projectSlug, startOfDay.toISOString())
+    .all();
+
+  let estimatedCostTodayUsd = null;
+  let costSourceCount = 0;
+  for (const row of costs.results || []) {
+    const cost = parseJson(row.cost_json, {});
+    const value = nullableNumber(
+      cost.totalOperationalCostUsd ??
+        cost.totalEstimatedCostUsd ??
+        cost.digitalOceanCostUsd ??
+        cost.codexCostUsd ??
+        cost.codexTaskAllocationUsd
+    );
+    if (value !== null) {
+      estimatedCostTodayUsd = (estimatedCostTodayUsd || 0) + value;
+      costSourceCount += 1;
+    }
+  }
+
+  const runningRows = running.results || [];
+  const runningJobCount = runningRows.reduce((sum, row) => sum + Number(row.count || 0), 0);
+  const hosts = runningRows.map((row) => row.remote_host).filter(Boolean);
+  const byteSize = Number(storage?.byte_size || 0);
+  const r2ByteSize = Number(storage?.r2_byte_size || 0);
+
+  return {
+    rawTelemetryStorage: {
+      available: true,
+      method: "d1_chunk_metadata_estimate",
+      byteSize,
+      r2ByteSize,
+      inlineByteSize: Math.max(0, byteSize - r2ByteSize),
+      chunkCount: Number(storage?.chunk_count || 0),
+      r2ObjectCount: Number(storage?.r2_object_count || 0),
+      reason: "Estimated from telemetry chunk metadata stored in D1."
+    },
+    snapshotStorage: {
+      available: false,
+      method: "unavailable",
+      byteSize: null,
+      reason: "Snapshot storage telemetry is not collected by this dashboard."
+    },
+    runningPods: {
+      available: true,
+      method: "derived_from_running_jobs",
+      count: runningJobCount,
+      hostCount: hosts.length,
+      hosts,
+      reason: runningJobCount ? "Derived from running dashboard jobs and remote hosts." : "No running jobs are currently reported."
+    },
+    estimatedCostToday: {
+      available: costSourceCount > 0,
+      method: costSourceCount > 0 ? "processed_job_cost_estimate" : "unavailable",
+      usd: estimatedCostTodayUsd,
+      sourceCount: costSourceCount,
+      reason: costSourceCount > 0
+        ? "Summed from processed stream cost telemetry for jobs processed today."
+        : "No processed cost telemetry is available for today."
+    }
+  };
 }
 
 function budgetWarnings({ usage, lastRun }) {

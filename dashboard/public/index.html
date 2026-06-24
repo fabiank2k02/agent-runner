@@ -7,75 +7,7 @@
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand-block">
-        <div class="brand-mark" aria-hidden="true">
-          <span></span>
-        </div>
-        <div class="brand-copy">
-          <p class="eyebrow">Agent Runner</p>
-          <h1>Now</h1>
-        </div>
-      </div>
-
-      <section class="top-metrics" aria-label="Job summary">
-        <div class="metric-card metric-running">
-          <span class="metric" id="metric-running">0</span>
-          <span class="label">Running</span>
-        </div>
-        <div class="metric-card metric-stuck">
-          <span class="metric" id="metric-stuck">0</span>
-          <span class="label">Attention</span>
-        </div>
-        <div class="metric-card metric-completed">
-          <span class="metric" id="metric-completed">0</span>
-          <span class="label">Completed</span>
-        </div>
-        <div class="metric-card metric-failed">
-          <span class="metric" id="metric-failed">0</span>
-          <span class="label">Failed</span>
-        </div>
-      </section>
-
-      <div class="top-actions">
-        <span class="access-badge"><span class="access-dot"></span>Access protected</span>
-        <span id="last-updated" class="freshness">Never updated</span>
-        <button id="refresh-button" class="refresh-button" type="button">
-          <span class="refresh-glyph" aria-hidden="true"></span>
-          <span>Refresh</span>
-        </button>
-      </div>
-    </header>
-
-    <main class="shell">
-      <nav class="view-tabs" aria-label="Dashboard views">
-        <button class="active" type="button" data-view="now">Now</button>
-        <button type="button" data-view="jobs">Runner Jobs</button>
-        <button type="button" data-view="threads">Local Threads</button>
-        <button type="button" data-view="memory">Memory</button>
-        <button type="button" data-view="processor">Processor</button>
-      </nav>
-      <section class="workspace">
-        <aside class="job-list" aria-label="Jobs">
-          <div class="section-head">
-            <div>
-              <p class="eyebrow" id="list-eyebrow">Queue</p>
-              <h2 id="list-title">Jobs</h2>
-            </div>
-            <span id="job-count" class="list-count">0 jobs</span>
-          </div>
-          <div id="jobs" class="jobs" aria-live="polite"></div>
-        </aside>
-
-        <article class="detail" id="detail" aria-live="polite">
-          <div class="empty-state">
-            <strong>Select a job</strong>
-            <span>Job details will appear here.</span>
-          </div>
-        </article>
-      </section>
-    </main>
-
+    <div id="app" class="app-shell" aria-live="polite"></div>
     <script src="/app.js" type="module"></script>
   </body>
 </html>
